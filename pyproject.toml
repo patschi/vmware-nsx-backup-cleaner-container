@@ -5,7 +5,7 @@
 # added on top of the vendor script.
 
 [project]
-name = "nsx-backup-cleaner-container"
+name = "vmware-nsx-backup-cleaner-container"
 version = "0.1.0"
 description = "Containerized scheduler around VMware's nsx_backup_cleaner.py for trimming old NSX Manager backups on an SFTP target."
 license = { text = "GPL-3.0-or-later" }

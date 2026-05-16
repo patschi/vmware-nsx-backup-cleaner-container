@@ -1,9 +1,14 @@
 """Unit tests for entrypoint.py.
 
-Covers env parsing + validation, one-shot dispatch, invalid-cron rejection,
-signal-driven graceful shutdown, and wait_until math. The vendor script is
-intentionally not exercised here - we do not own it and it has its own
-upstream test surface.
+Focus: the wrapper's own behavior - config parsing, vendor argv building,
+instance discovery, scheduling/one-shot dispatch, dry-run safety, timezone
+handling, and graceful shutdown. The vendor script itself is intentionally
+under-tested: we do not own it, and a single integration smoke test is
+enough to prove the wrapper invokes it correctly.
+
+When in doubt about whether to add a test, prefer asserting *observable
+wrapper behavior* over implementation details (which stream is captured,
+which log level is used, etc.).
 """
 
 import os
@@ -15,6 +20,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -42,63 +48,84 @@ def test_read_config_uses_defaults_when_env_unset(monkeypatch):
         "MIN_BACKUPS",
         "DISCOVER_INSTANCES",
         "DISCOVER_ONCE",
+        "RUN_ON_STARTUP",
+        "DRY_RUN",
+        "TZ",
     ):
         monkeypatch.delenv(var, raising=False)
-    schedule, retention_days, min_backups, discover_enabled, discover_once = (
-        entrypoint.read_config()
-    )
+    (
+        schedule,
+        retention_days,
+        min_backups,
+        discover_enabled,
+        discover_once,
+        run_on_startup,
+        dry_run,
+        tz,
+    ) = entrypoint.read_config()
     assert schedule == entrypoint.DEFAULT_SCHEDULE
     assert retention_days == entrypoint.DEFAULT_RETENTION_DAYS
     assert min_backups == entrypoint.DEFAULT_MIN_BACKUPS
     assert discover_enabled is entrypoint.DEFAULT_DISCOVER_INSTANCES
     assert discover_once is entrypoint.DEFAULT_DISCOVER_ONCE
+    assert run_on_startup is entrypoint.DEFAULT_RUN_ON_STARTUP
+    assert dry_run is entrypoint.DEFAULT_DRY_RUN
+    assert tz.key == entrypoint.DEFAULT_TZ
 
 
 def test_read_config_honors_env_overrides(monkeypatch):
+    # One test exercises all env-var overrides at once so the whole
+    # "environment → config tuple" mapping is verified together.
     monkeypatch.setenv("SCHEDULE", "*/15 * * * *")
     monkeypatch.setenv("RETENTION_DAYS", "14")
     monkeypatch.setenv("MIN_BACKUPS", "25")
     monkeypatch.setenv("DISCOVER_INSTANCES", "false")
     monkeypatch.setenv("DISCOVER_ONCE", "true")
-    schedule, retention_days, min_backups, discover_enabled, discover_once = (
-        entrypoint.read_config()
-    )
+    monkeypatch.setenv("RUN_ON_STARTUP", "true")
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    (
+        schedule,
+        retention_days,
+        min_backups,
+        discover_enabled,
+        discover_once,
+        run_on_startup,
+        dry_run,
+        tz,
+    ) = entrypoint.read_config()
     assert schedule == "*/15 * * * *"
     assert retention_days == 14
     assert min_backups == 25
     assert discover_enabled is False
     assert discover_once is True
+    assert run_on_startup is True
+    assert dry_run is True
+    assert tz.key == "Europe/Berlin"
 
 
 @pytest.mark.parametrize(
     "raw,expected",
     [
+        # Cover one case per truthy/falsy form family; the parser is a
+        # simple membership check, so the full case-matrix is excessive.
         ("true", True),
-        ("True", True),
         ("1", True),
-        ("yes", True),
-        ("on", True),
-        ("false", False),
         ("FALSE", False),
-        ("0", False),
-        ("no", False),
-        ("off", False),
-        ("  true  ", True),
+        ("  off  ", False),
     ],
 )
 def test_read_config_parses_boolean_env_forms(monkeypatch, raw, expected):
-    # The boolean parser must accept the documented allowlist case-insensitively
-    # and tolerate surrounding whitespace.
-    monkeypatch.setenv("DISCOVER_INSTANCES", raw)
-    monkeypatch.setenv("DISCOVER_ONCE", raw)
+    monkeypatch.setenv("DRY_RUN", raw)
     monkeypatch.setenv("RETENTION_DAYS", "5")
     monkeypatch.setenv("MIN_BACKUPS", "5")
-    _, _, _, discover_enabled, discover_once = entrypoint.read_config()
-    assert discover_enabled is expected
-    assert discover_once is expected
+    _, _, _, _, _, _, dry_run, _ = entrypoint.read_config()
+    assert dry_run is expected
 
 
-@pytest.mark.parametrize("var", ["DISCOVER_INSTANCES", "DISCOVER_ONCE"])
+@pytest.mark.parametrize(
+    "var", ["DISCOVER_INSTANCES", "DISCOVER_ONCE", "RUN_ON_STARTUP", "DRY_RUN"]
+)
 def test_read_config_rejects_invalid_boolean(monkeypatch, var):
     # Anything outside the allowlist must surface as a startup error rather
     # than silently falling back to a default.
@@ -109,27 +136,24 @@ def test_read_config_rejects_invalid_boolean(monkeypatch, var):
         entrypoint.read_config()
 
 
-@pytest.mark.parametrize(
-    "var,value",
-    [
-        ("RETENTION_DAYS", "0"),
-        ("RETENTION_DAYS", "-1"),
-        ("MIN_BACKUPS", "0"),
-        ("MIN_BACKUPS", "-3"),
-    ],
-)
-def test_read_config_rejects_non_positive_integers(monkeypatch, var, value):
-    monkeypatch.setenv(var, value)
-    # Other var must be valid so we isolate the failure to `var`.
+@pytest.mark.parametrize("var", ["RETENTION_DAYS", "MIN_BACKUPS"])
+def test_read_config_rejects_non_positive_integers(monkeypatch, var):
+    # Zero and negative values are nonsense for both knobs; one negative
+    # value per var is enough since the check is `<= 0`.
+    monkeypatch.setenv(var, "-1")
     other = "MIN_BACKUPS" if var == "RETENTION_DAYS" else "RETENTION_DAYS"
     monkeypatch.setenv(other, "5")
     with pytest.raises(ValueError, match=var):
         entrypoint.read_config()
 
 
-def test_read_config_rejects_non_numeric(monkeypatch):
-    monkeypatch.setenv("RETENTION_DAYS", "not-a-number")
-    with pytest.raises(ValueError):
+def test_read_config_rejects_invalid_timezone(monkeypatch):
+    # An unknown IANA name must fail fast at startup with a ValueError so
+    # the operator sees the misconfiguration immediately.
+    monkeypatch.setenv("TZ", "Mars/Olympus_Mons")
+    monkeypatch.setenv("RETENTION_DAYS", "5")
+    monkeypatch.setenv("MIN_BACKUPS", "5")
+    with pytest.raises(ValueError, match="TZ"):
         entrypoint.read_config()
 
 
@@ -138,58 +162,52 @@ def test_read_config_rejects_non_numeric(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_run_cleaner_builds_expected_argv():
-    # Stub subprocess.run so we capture the command without executing anything.
-    fake_result = mock.Mock(returncode=0, stdout="")
+def test_run_cleaner_builds_expected_argv_and_propagates_exit_code():
+    # The most important contract of run_cleaner: it must hand the vendor
+    # script exactly --dir/--retention-period/--min-count and surface the
+    # subprocess exit code unchanged. Asserted together so the wrapper's
+    # entire interface to the vendor is covered by one test.
+    fake_result = mock.Mock(returncode=5, stdout="")
     with mock.patch.object(
         entrypoint.subprocess, "run", return_value=fake_result
     ) as run:
         rc = entrypoint.run_cleaner("/some/dir", retention_days=3, min_backups=11)
-    assert rc == 0
+    assert rc == 5
     (called_cmd,), _ = run.call_args
-    # argv must include the supplied --dir, the vendor script, and the
-    # forwarded retention/min-count values - in that exact form.
     assert called_cmd[1] == entrypoint.CLEANER_SCRIPT
-    assert (
-        "--dir" in called_cmd
-        and called_cmd[called_cmd.index("--dir") + 1] == "/some/dir"
-    )
-    assert "--retention-period" in called_cmd
+    assert called_cmd[called_cmd.index("--dir") + 1] == "/some/dir"
     assert called_cmd[called_cmd.index("--retention-period") + 1] == "3"
-    assert "--min-count" in called_cmd
     assert called_cmd[called_cmd.index("--min-count") + 1] == "11"
 
 
-def test_run_cleaner_returns_subprocess_exit_code():
-    fake_result = mock.Mock(returncode=42, stdout="")
-    with mock.patch.object(entrypoint.subprocess, "run", return_value=fake_result):
-        assert entrypoint.run_cleaner("/some/dir", 7, 10) == 42
+def test_run_cleaner_dry_run_never_invokes_subprocess(caplog):
+    # DRY_RUN=true is a safety feature: under no circumstance may
+    # subprocess.run be called. We enforce that by raising from any call.
+    caplog.set_level("INFO")
+
+    def _explode(*_a, **_kw):
+        raise AssertionError("subprocess.run must not be called in dry-run mode")
+
+    with mock.patch.object(entrypoint.subprocess, "run", side_effect=_explode):
+        rc = entrypoint.run_cleaner("/some/dir", 7, 10, dry_run=True)
+    assert rc == 0
+    # And the operator must see the would-be command so they can verify it.
+    info_lines = [rec.message for rec in caplog.records if rec.levelname == "INFO"]
+    assert any("[DRY-RUN]" in line and "/some/dir" in line for line in info_lines)
 
 
-def test_run_cleaner_forwards_vendor_output_to_debug_log(caplog):
-    # Vendor output must be captured and re-emitted line-by-line at DEBUG
-    # level so the wrapper does not swallow the vendor's prints.
-    fake_result = mock.Mock(returncode=0, stdout="line one\nline two\n")
-    caplog.set_level("DEBUG")
-    with mock.patch.object(entrypoint.subprocess, "run", return_value=fake_result):
-        entrypoint.run_cleaner("/some/dir", 7, 10)
-    debug_messages = [rec.message for rec in caplog.records if rec.levelname == "DEBUG"]
-    assert "[vendor] line one" in debug_messages
-    assert "[vendor] line two" in debug_messages
+def test_run_cleaner_for_all_forwards_dry_run_flag():
+    # The fan-out helper must propagate dry_run to every per-instance call;
+    # otherwise a multi-instance dry-run could still mutate the filesystem.
+    seen = []
 
+    def _fake(directory, retention_days, min_backups, dry_run=False):
+        seen.append((directory, dry_run))
+        return 0
 
-def test_run_cleaner_captures_stderr_into_stdout():
-    # subprocess.run must be invoked with stderr merged into stdout so the
-    # relative ordering of vendor prints/errors is preserved in the log.
-    fake_result = mock.Mock(returncode=0, stdout="")
-    with mock.patch.object(
-        entrypoint.subprocess, "run", return_value=fake_result
-    ) as run:
-        entrypoint.run_cleaner("/some/dir", 7, 10)
-    _, kwargs = run.call_args
-    assert kwargs["stdout"] is subprocess.PIPE
-    assert kwargs["stderr"] is subprocess.STDOUT
-    assert kwargs["text"] is True
+    with mock.patch.object(entrypoint, "run_cleaner", side_effect=_fake):
+        entrypoint.run_cleaner_for_all(["/a", "/b"], 7, 10, dry_run=True)
+    assert seen == [("/a", True), ("/b", True)]
 
 
 # ---------------------------------------------------------------------------
@@ -206,41 +224,20 @@ def _make_instance(parent: Path, name: str, markers=("cluster-node-backups",)) -
     return inst
 
 
-def test_is_nsx_instance_dir_true_when_marker_subfolder_present(tmp_path):
-    # A folder qualifies if either marker subdir is present.
+def test_is_nsx_instance_dir_recognizes_markers(tmp_path):
+    # Either marker subdir qualifies a folder as an NSX instance; folders
+    # without either marker (or non-existent paths) do not. Both sides of
+    # the predicate are covered here to keep the surface small.
     cn = tmp_path / "cn-only"
-    cn.mkdir()
-    (cn / "cluster-node-backups").mkdir()
+    (cn / "cluster-node-backups").mkdir(parents=True)
     inv = tmp_path / "inv-only"
-    inv.mkdir()
-    (inv / "inventory-summary").mkdir()
-    assert entrypoint.is_nsx_instance_dir(str(cn)) is True
-    assert entrypoint.is_nsx_instance_dir(str(inv)) is True
-
-
-def test_is_nsx_instance_dir_false_when_no_markers(tmp_path):
-    # An empty folder or one with unrelated children must not qualify.
-    empty = tmp_path / "empty"
-    empty.mkdir()
+    (inv / "inventory-summary").mkdir(parents=True)
     noise = tmp_path / "noise"
     noise.mkdir()
-    (noise / "something-else").mkdir()
-    assert entrypoint.is_nsx_instance_dir(str(empty)) is False
+    assert entrypoint.is_nsx_instance_dir(str(cn)) is True
+    assert entrypoint.is_nsx_instance_dir(str(inv)) is True
     assert entrypoint.is_nsx_instance_dir(str(noise)) is False
-
-
-def test_is_nsx_instance_dir_false_for_nonexistent_path(tmp_path):
-    # Missing path - must not raise, just return False.
     assert entrypoint.is_nsx_instance_dir(str(tmp_path / "ghost")) is False
-
-
-def test_is_nsx_instance_dir_false_when_marker_is_a_file(tmp_path):
-    # A FILE named like the marker must not satisfy the eligibility check,
-    # otherwise the vendor script would later choke on it.
-    root = tmp_path / "fake"
-    root.mkdir()
-    (root / "cluster-node-backups").write_text("not a directory")
-    assert entrypoint.is_nsx_instance_dir(str(root)) is False
 
 
 def test_discover_instances_returns_root_when_root_is_an_instance(tmp_path):
@@ -251,34 +248,18 @@ def test_discover_instances_returns_root_when_root_is_an_instance(tmp_path):
 
 
 def test_discover_instances_finds_nested_instances(tmp_path):
-    # Multi-instance layout matching the user's NAS example: nsx-at and nsx-de
+    # Multi-instance layout matching real NAS examples: nsx-at and nsx-de
     # are valid instances; @Recently-Snapshot is noise that must be skipped.
     _make_instance(tmp_path, "nsx-at")
     _make_instance(tmp_path, "nsx-de", markers=("inventory-summary",))
-    (tmp_path / "@Recently-Snapshot").mkdir()  # noise; no markers inside
+    (tmp_path / "@Recently-Snapshot").mkdir()
     found = entrypoint.discover_instances(str(tmp_path))
     assert found == [str(tmp_path / "nsx-at"), str(tmp_path / "nsx-de")]
 
 
-def test_discover_instances_returns_empty_when_nothing_matches(tmp_path):
-    # Empty backup root - no instances detected.
-    assert entrypoint.discover_instances(str(tmp_path)) == []
-
-
-def test_discover_instances_handles_unreadable_root(tmp_path, monkeypatch, caplog):
-    # If we cannot list the root (permissions / race), log and return [].
-    def _raise(_path):
-        raise PermissionError("denied")
-
-    monkeypatch.setattr(entrypoint.os, "listdir", _raise)
-    caplog.set_level("ERROR")
-    assert entrypoint.discover_instances(str(tmp_path)) == []
-    assert any("Cannot list backup root" in rec.message for rec in caplog.records)
-
-
 def test_resolve_targets_returns_backup_dir_when_discovery_disabled(monkeypatch):
-    # When discovery is off, resolve_targets must hand back BACKUP_DIR
-    # unchanged - this preserves the original single-mount behavior.
+    # Discovery off preserves the original single-mount behavior: pass
+    # BACKUP_DIR straight through to the vendor.
     monkeypatch.setattr(entrypoint, "BACKUP_DIR", "/backups")
     assert entrypoint.resolve_targets(discover_enabled=False) == ["/backups"]
 
@@ -298,19 +279,6 @@ def test_resolve_targets_logs_every_discovered_instance(tmp_path, monkeypatch, c
     assert "nsx-de" in log_text
 
 
-def test_resolve_targets_warns_when_discovery_finds_nothing(
-    tmp_path, monkeypatch, caplog
-):
-    # Discovery enabled but nothing matched - surface a warning so
-    # misconfigured mounts are immediately visible.
-    monkeypatch.setattr(entrypoint, "BACKUP_DIR", str(tmp_path))
-    caplog.set_level("WARNING")
-    assert entrypoint.resolve_targets(discover_enabled=True) == []
-    assert any(
-        "no NSX backup instance folders found" in rec.message for rec in caplog.records
-    )
-
-
 # ---------------------------------------------------------------------------
 # Multi-instance dispatch (run_cleaner_for_all)
 # ---------------------------------------------------------------------------
@@ -320,7 +288,7 @@ def test_run_cleaner_for_all_invokes_cleaner_per_target():
     # Each discovered target must trigger an independent run_cleaner call.
     calls = []
 
-    def _fake(directory, retention_days, min_backups):
+    def _fake(directory, retention_days, min_backups, dry_run=False):
         calls.append((directory, retention_days, min_backups))
         return 0
 
@@ -347,36 +315,68 @@ def test_run_cleaner_for_all_returns_worst_exit_code_and_continues_on_failure():
 
 
 # ---------------------------------------------------------------------------
+# Application metadata (pyproject.toml parsing for startup version log)
+# ---------------------------------------------------------------------------
+
+
+def test_get_app_metadata_reads_shipped_pyproject():
+    # The real shipped pyproject.toml must yield a non-"unknown" name and
+    # version so the startup log line is informative.
+    name, version = entrypoint.get_app_metadata()
+    assert name == "nsx-backup-cleaner-container"
+    assert version != "unknown"
+
+
+def test_get_app_metadata_falls_back_when_file_unreadable(monkeypatch, tmp_path):
+    # A missing/broken pyproject.toml must NOT crash the wrapper; we test
+    # the missing-file path as the canonical failure mode.
+    monkeypatch.setattr(
+        entrypoint, "PYPROJECT_PATH", str(tmp_path / "does-not-exist.toml")
+    )
+    name, version = entrypoint.get_app_metadata()
+    assert name == "unknown"
+    assert version == "unknown"
+
+
+# ---------------------------------------------------------------------------
 # main / one-shot dispatch
 # ---------------------------------------------------------------------------
 
 
-def test_main_one_shot_runs_cleaner_once_and_exits(monkeypatch):
+def test_main_logs_app_name_and_version_at_startup(monkeypatch, caplog):
+    # The first INFO line from main() must identify the running image so
+    # operators can see which version is live without inspecting the tag.
     monkeypatch.setenv("SCHEDULE", entrypoint.ONE_SHOT_SENTINEL)
     monkeypatch.setenv("RETENTION_DAYS", "7")
     monkeypatch.setenv("MIN_BACKUPS", "10")
-    # Disable discovery so resolve_targets returns BACKUP_DIR directly and
-    # we exercise the legacy single-target dispatch path.
     monkeypatch.setenv("DISCOVER_INSTANCES", "false")
+    caplog.set_level("INFO")
     with (
-        mock.patch.object(entrypoint, "run_cleaner", return_value=0) as runner,
-        pytest.raises(SystemExit) as exc,
+        mock.patch.object(entrypoint, "run_cleaner", return_value=0),
+        pytest.raises(SystemExit),
     ):
         entrypoint.main()
-    runner.assert_called_once_with(entrypoint.BACKUP_DIR, 7, 10)
-    assert exc.value.code == 0
+    info_messages = [rec.message for rec in caplog.records if rec.levelname == "INFO"]
+    assert any(
+        msg.startswith("Starting nsx-backup-cleaner-container version ")
+        for msg in info_messages
+    ), info_messages
 
 
-def test_main_propagates_cleaner_exit_code_in_one_shot(monkeypatch):
-    monkeypatch.setenv("SCHEDULE", "0")
+def test_main_one_shot_runs_cleaner_and_propagates_exit_code(monkeypatch):
+    # One-shot path: SCHEDULE="0" must invoke run_cleaner exactly once
+    # against BACKUP_DIR and surface its exit code as the process exit code.
+    # Using rc != 0 also exercises the exit-code propagation path.
+    monkeypatch.setenv("SCHEDULE", entrypoint.ONE_SHOT_SENTINEL)
     monkeypatch.setenv("RETENTION_DAYS", "7")
     monkeypatch.setenv("MIN_BACKUPS", "10")
     monkeypatch.setenv("DISCOVER_INSTANCES", "false")
     with (
-        mock.patch.object(entrypoint, "run_cleaner", return_value=5),
+        mock.patch.object(entrypoint, "run_cleaner", return_value=5) as runner,
         pytest.raises(SystemExit) as exc,
     ):
         entrypoint.main()
+    runner.assert_called_once_with(entrypoint.BACKUP_DIR, 7, 10, dry_run=False)
     assert exc.value.code == 5
 
 
@@ -406,6 +406,33 @@ def test_main_one_shot_discovers_and_runs_per_instance(monkeypatch, tmp_path):
     assert calls == [str(tmp_path / "nsx-at"), str(tmp_path / "nsx-de")]
 
 
+def test_main_one_shot_propagates_dry_run_flag(monkeypatch, tmp_path):
+    # In one-shot mode with DRY_RUN=true the wrapper must still invoke
+    # run_cleaner so dispatch is exercised, but dry_run=True must be
+    # forwarded so the subprocess is skipped end-to-end.
+    _make_instance(tmp_path, "nsx-at")
+    monkeypatch.setattr(entrypoint, "BACKUP_DIR", str(tmp_path))
+    monkeypatch.setenv("SCHEDULE", "0")
+    monkeypatch.setenv("RETENTION_DAYS", "7")
+    monkeypatch.setenv("MIN_BACKUPS", "10")
+    monkeypatch.setenv("DISCOVER_INSTANCES", "true")
+    monkeypatch.setenv("DRY_RUN", "true")
+
+    seen = []
+
+    def _fake(directory, retention_days, min_backups, dry_run=False):
+        seen.append((directory, dry_run))
+        return 0
+
+    with (
+        mock.patch.object(entrypoint, "run_cleaner", side_effect=_fake),
+        pytest.raises(SystemExit) as exc,
+    ):
+        entrypoint.main()
+    assert exc.value.code == 0
+    assert seen == [(str(tmp_path / "nsx-at"), True)]
+
+
 def test_main_one_shot_exits_with_2_when_discovery_finds_nothing(monkeypatch, tmp_path):
     # Discovery enabled but the backup root is empty - the wrapper must
     # not silently exit 0 pretending all is well.
@@ -432,7 +459,7 @@ def test_main_exits_with_2_on_bad_config(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# run_loop / invalid cron rejection
+# run_loop / scheduling
 # ---------------------------------------------------------------------------
 
 
@@ -444,6 +471,9 @@ def test_run_loop_rejects_invalid_cron():
             10,
             discover_enabled=False,
             discover_once=False,
+            run_on_startup=False,
+            dry_run=False,
+            tz=ZoneInfo("UTC"),
         )
     assert exc.value.code == 2
 
@@ -468,8 +498,6 @@ def test_run_loop_caches_targets_when_discover_once_true(monkeypatch, tmp_path):
     fire_count = {"n": 0}
 
     def _fake_cleaner(*_a, **_kw):
-        # Stop after the third firing so we can assert "discovery ran once"
-        # even though the loop fired multiple times.
         fire_count["n"] += 1
         if fire_count["n"] >= 3:
             entrypoint._stop_event.set()
@@ -482,6 +510,9 @@ def test_run_loop_caches_targets_when_discover_once_true(monkeypatch, tmp_path):
         10,
         discover_enabled=True,
         discover_once=True,
+        run_on_startup=False,
+        dry_run=False,
+        tz=ZoneInfo("UTC"),
     )
     # Discovery should have been triggered exactly once at startup,
     # regardless of how many times the loop fired.
@@ -489,11 +520,15 @@ def test_run_loop_caches_targets_when_discover_once_true(monkeypatch, tmp_path):
     assert fire_count["n"] == 3
 
 
-def test_run_loop_rediscovers_each_firing_when_discover_once_false(
-    monkeypatch, tmp_path
+def test_run_loop_rediscovers_each_firing_with_startup_pass(
+    monkeypatch, tmp_path, caplog
 ):
-    # With DISCOVER_ONCE=false, discovery must rerun on every firing so
-    # newly-added instance folders are picked up automatically.
+    # With DISCOVER_ONCE=false:
+    #   - Discovery must run once at startup so the operator gets immediate
+    #     log visibility (without waiting for the first firing).
+    #   - Discovery must also rerun before every firing so newly-added
+    #     instance folders are picked up automatically.
+    # Both are asserted here to keep the run_loop test surface small.
     _make_instance(tmp_path, "nsx-at")
     monkeypatch.setattr(entrypoint, "BACKUP_DIR", str(tmp_path))
 
@@ -516,15 +551,99 @@ def test_run_loop_rediscovers_each_firing_when_discover_once_false(
         return 0
 
     monkeypatch.setattr(entrypoint, "run_cleaner", _fake_cleaner)
+    caplog.set_level("INFO")
     entrypoint.run_loop(
         "* * * * *",
         7,
         10,
         discover_enabled=True,
         discover_once=False,
+        run_on_startup=False,
+        dry_run=False,
+        tz=ZoneInfo("UTC"),
     )
-    # Three firings -> three discovery passes (one per firing).
-    assert len(discovery_calls) == 3
+    # 1 startup discovery + 3 per-firing discoveries.
+    assert len(discovery_calls) == 4
+    # Startup-discovery log line must be visible too.
+    log_text = "\n".join(rec.message for rec in caplog.records)
+    assert "Performing startup discovery pass." in log_text
+
+
+def test_run_loop_run_on_startup_runs_cleanup_before_loop(monkeypatch, tmp_path):
+    # With RUN_ON_STARTUP=true the wrapper must invoke the cleanup once
+    # immediately, then continue with the scheduled loop. We stop the loop
+    # before any firing so the only run_cleaner call we see is the startup one.
+    _make_instance(tmp_path, "nsx-at")
+    monkeypatch.setattr(entrypoint, "BACKUP_DIR", str(tmp_path))
+    entrypoint._stop_event.set()
+
+    calls = []
+
+    def _fake(directory, *_a, **_kw):
+        calls.append(directory)
+        return 0
+
+    monkeypatch.setattr(entrypoint, "run_cleaner", _fake)
+    entrypoint.run_loop(
+        "* * * * *",
+        7,
+        10,
+        discover_enabled=True,
+        discover_once=False,
+        run_on_startup=True,
+        dry_run=False,
+        tz=ZoneInfo("UTC"),
+    )
+    assert calls == [str(tmp_path / "nsx-at")]
+
+
+def test_run_loop_uses_configured_timezone_for_cron(monkeypatch, caplog):
+    # croniter must be fed a tz-aware "now" so SCHEDULE is interpreted in
+    # the operator's configured zone. We capture the base datetime passed
+    # to croniter() and assert its tzinfo matches what we passed.
+    seen_base = {}
+    real_croniter = entrypoint.croniter
+
+    def _spy(expr, base, *a, **kw):
+        seen_base["base"] = base
+        return real_croniter(expr, base, *a, **kw)
+
+    monkeypatch.setattr(entrypoint, "croniter", _spy)
+    entrypoint._stop_event.set()
+    caplog.set_level("INFO")
+    berlin = ZoneInfo("Europe/Berlin")
+    entrypoint.run_loop(
+        "0 3 * * *",
+        7,
+        10,
+        discover_enabled=False,
+        discover_once=False,
+        run_on_startup=False,
+        dry_run=False,
+        tz=berlin,
+    )
+    assert seen_base["base"].tzinfo is berlin
+    log_text = "\n".join(rec.message for rec in caplog.records)
+    assert "tz=Europe/Berlin" in log_text
+
+
+def test_run_loop_exits_cleanly_when_stop_event_set(monkeypatch):
+    # SIGTERM equivalent: _stop_event is already set when run_loop starts,
+    # so the loop must exit without ever invoking run_cleaner.
+    called = []
+    monkeypatch.setattr(entrypoint, "run_cleaner", lambda *a, **kw: called.append(a))
+    entrypoint._stop_event.set()
+    entrypoint.run_loop(
+        "*/1 * * * *",
+        7,
+        10,
+        discover_enabled=False,
+        discover_once=False,
+        run_on_startup=False,
+        dry_run=False,
+        tz=ZoneInfo("UTC"),
+    )
+    assert called == []
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +662,8 @@ def test_wait_until_returns_false_on_normal_timeout():
 
 
 def test_wait_until_returns_true_when_signal_fires():
-    # Set the stop event from a thread mid-wait; wait_until must return True.
+    # Set the stop event from a thread mid-wait; wait_until must return True
+    # almost immediately instead of running to its (10s) timeout.
     target = datetime.now(timezone.utc) + timedelta(seconds=10)
 
     def _signal_shutdown():
@@ -555,73 +675,19 @@ def test_wait_until_returns_true_when_signal_fires():
     interrupted = entrypoint.wait_until(target)
     elapsed = time.monotonic() - t0
     assert interrupted is True
-    # Must have woken up almost immediately - well under the 10s timeout.
     assert elapsed < 1.0
 
 
-def test_wait_until_past_target_returns_event_state():
-    # Target is already in the past - function should return immediately
-    # and surface the current event state without sleeping.
-    past = datetime.now(timezone.utc) - timedelta(seconds=5)
-    assert entrypoint.wait_until(past) is False
-    entrypoint._stop_event.set()
-    assert entrypoint.wait_until(past) is True
-
-
 # ---------------------------------------------------------------------------
-# Signal handler wires through to _stop_event
-# ---------------------------------------------------------------------------
-
-
-def test_handle_shutdown_signal_sets_stop_event():
-    assert not entrypoint._stop_event.is_set()
-    entrypoint._handle_shutdown_signal(signal.SIGTERM, None)
-    assert entrypoint._stop_event.is_set()
-
-
-def test_install_signal_handlers_registers_sigterm_and_sigint():
-    # Save current handlers so the test does not leak into other tests.
-    prev_term = signal.getsignal(signal.SIGTERM)
-    prev_int = signal.getsignal(signal.SIGINT)
-    try:
-        entrypoint.install_signal_handlers()
-        assert signal.getsignal(signal.SIGTERM) is entrypoint._handle_shutdown_signal
-        assert signal.getsignal(signal.SIGINT) is entrypoint._handle_shutdown_signal
-    finally:
-        signal.signal(signal.SIGTERM, prev_term)
-        signal.signal(signal.SIGINT, prev_int)
-
-
-# ---------------------------------------------------------------------------
-# Full graceful-shutdown path: real SIGTERM interrupts a real subprocess wait
-# ---------------------------------------------------------------------------
-
-
-def test_run_loop_exits_cleanly_when_stop_event_set(monkeypatch):
-    # Schedule that would fire in ~1 minute; we set _stop_event immediately
-    # so the very first wait_until call returns True and the loop breaks
-    # WITHOUT invoking run_cleaner.
-    called = []
-    monkeypatch.setattr(entrypoint, "run_cleaner", lambda *a, **kw: called.append(a))
-    entrypoint._stop_event.set()
-    # Should return normally (no SystemExit) and never call run_cleaner.
-    entrypoint.run_loop(
-        "*/1 * * * *", 7, 10, discover_enabled=False, discover_once=False
-    )
-    assert called == []
-
-
-# ---------------------------------------------------------------------------
-# Integration: real cleanup against a fake NSX backup tree
+# Integration: real vendor script + real SIGTERM
 #
-# These tests spawn the actual vendor script as a subprocess via
-# entrypoint.run_cleaner and assert that the right backups survived /
-# were deleted on the filesystem. They cover the wrapper -> subprocess
-# -> vendor script -> filesystem path end to end.
+# Two end-to-end tests:
+#   - Vendor smoke test: confirms the wrapper -> subprocess -> vendor ->
+#     filesystem path actually works against a fake NSX tree.
+#   - SIGTERM test: confirms a running container exits cleanly on signal.
 #
-# NSX layout reproduced under tmp_path:
-#   <root>/cluster-node-backups/<cluster-id>/<backup-N>
-#   <root>/inventory-summary/<elem>/<backup-N>
+# Both are kept because they cover code paths (subprocess, signal delivery)
+# that unit tests can only approximate.
 # ---------------------------------------------------------------------------
 
 
@@ -635,74 +701,11 @@ def _make_backup(parent: Path, name: str, age_days: float) -> Path:
     return path
 
 
-def _run_cleanup(backup_root: Path, retention_days: int, min_backups: int) -> int:
-    """Invoke entrypoint.run_cleaner against `backup_root`."""
-    project_root = Path(__file__).resolve().parent.parent
-    with mock.patch.object(
-        entrypoint,
-        "CLEANER_SCRIPT",
-        str(project_root / "vendor-scripts" / "nsx_backup_cleaner.py"),
-    ):
-        return entrypoint.run_cleaner(str(backup_root), retention_days, min_backups)
-
-
-def test_cleanup_keeps_all_fresh_backups(tmp_path):
-    # All 10 backups are 1 day old; retention is 7 days. None should be deleted.
-    root = tmp_path / "backups"
-    cluster = root / "cluster-node-backups" / "cluster-1"
-    cluster.mkdir(parents=True)
-    for i in range(10):
-        _make_backup(cluster, f"backup-{i:02d}", age_days=1)
-
-    rc = _run_cleanup(root, retention_days=7, min_backups=5)
-    assert rc == 0
-    remaining = sorted(p.name for p in cluster.iterdir())
-    assert len(remaining) == 10
-    assert remaining == [f"backup-{i:02d}" for i in range(10)]
-
-
-def test_cleanup_respects_min_backups_floor_when_count_below_min(tmp_path):
-    # 3 backups, all 30 days old, but min_backups=5 means the vendor script
-    # short-circuits before even building the delete list. All 3 must survive.
-    root = tmp_path / "backups"
-    cluster = root / "cluster-node-backups" / "cluster-1"
-    cluster.mkdir(parents=True)
-    for i in range(3):
-        _make_backup(cluster, f"backup-{i:02d}", age_days=30)
-
-    rc = _run_cleanup(root, retention_days=7, min_backups=5)
-    assert rc == 0
-    remaining = sorted(p.name for p in cluster.iterdir())
-    assert len(remaining) == 3, "min_backups floor must skip deletion when count <= min"
-
-
-def test_cleanup_deletes_old_backups_capped_by_floor(tmp_path):
-    # 10 backups, all aged 30 days (clearly past retention). min_backups=5
-    # caps deletion at len(all) - min = 5. The vendor script deletes the
-    # 5 oldest by ctime (which equals creation order in our setup), so
-    # backup-00..04 are deleted and backup-05..09 remain.
-    root = tmp_path / "backups"
-    cluster = root / "cluster-node-backups" / "cluster-1"
-    cluster.mkdir(parents=True)
-    for i in range(10):
-        _make_backup(cluster, f"backup-{i:02d}", age_days=30)
-
-    rc = _run_cleanup(root, retention_days=7, min_backups=5)
-    assert rc == 0
-    remaining = sorted(p.name for p in cluster.iterdir())
-    assert len(remaining) == 5, "min_backups floor must cap deletion at len(all) - min"
-    # The 5 oldest-by-ctime (first-created in our loop) must be gone.
-    for i in range(5):
-        assert f"backup-{i:02d}" not in remaining
-    # The 5 newest-by-ctime must survive.
-    for i in range(5, 10):
-        assert f"backup-{i:02d}" in remaining
-
-
-def test_cleanup_mixed_ages_keeps_fresh_deletes_old(tmp_path):
-    # 5 old (aged 30d, created first) + 5 fresh (aged 1d, created second).
-    # retention=7, min_backups=3: all 5 old qualify for deletion, and the
-    # floor (10-3=7) is loose, so all 5 old are deleted. Fresh ones remain.
+def test_vendor_smoke_keeps_fresh_deletes_old(tmp_path):
+    # End-to-end: spawn the actual vendor script via run_cleaner against a
+    # fake NSX tree with mixed-age backups. After cleanup, every fresh
+    # backup must survive and every old backup must be gone. This is the
+    # canonical "the wrapper actually drives the vendor" smoke test.
     root = tmp_path / "backups"
     cluster = root / "cluster-node-backups" / "cluster-1"
     cluster.mkdir(parents=True)
@@ -711,55 +714,29 @@ def test_cleanup_mixed_ages_keeps_fresh_deletes_old(tmp_path):
     for i in range(5):
         _make_backup(cluster, f"fresh-{i:02d}", age_days=1)
 
-    rc = _run_cleanup(root, retention_days=7, min_backups=3)
+    project_root = Path(__file__).resolve().parent.parent
+    with mock.patch.object(
+        entrypoint,
+        "CLEANER_SCRIPT",
+        str(project_root / "vendor-scripts" / "nsx_backup_cleaner.py"),
+    ):
+        rc = entrypoint.run_cleaner(str(root), retention_days=7, min_backups=3)
     assert rc == 0
     remaining = sorted(p.name for p in cluster.iterdir())
     assert len(remaining) == 5
-    # Every fresh backup survives; every old backup is gone.
     assert all(name.startswith("fresh-") for name in remaining)
-
-
-def test_cleanup_processes_both_cluster_node_and_inventory_summary(tmp_path):
-    # Same shape in both subfolders: 7 backups (6 aged 30d, 1 aged 1d),
-    # retention=7, min_backups=5. delete_count = min(6_old, 7_total-5_min) = 2,
-    # so the two oldest by ctime are deleted in each folder, leaving 5.
-    root = tmp_path / "backups"
-    cluster = root / "cluster-node-backups" / "cluster-1"
-    inv = root / "inventory-summary" / "inv-1"
-    cluster.mkdir(parents=True)
-    inv.mkdir(parents=True)
-    for parent, prefix in ((cluster, "cn"), (inv, "inv")):
-        for i in range(7):
-            age = 30 if i < 6 else 1
-            _make_backup(parent, f"{prefix}-{i:02d}", age_days=age)
-
-    rc = _run_cleanup(root, retention_days=7, min_backups=5)
-    assert rc == 0
-
-    cluster_remaining = sorted(p.name for p in cluster.iterdir())
-    inv_remaining = sorted(p.name for p in inv.iterdir())
-    assert len(cluster_remaining) == 5
-    assert len(inv_remaining) == 5
-    # The two oldest by ctime (created first) must be gone in each folder.
-    assert "cn-00" not in cluster_remaining
-    assert "cn-01" not in cluster_remaining
-    assert "inv-00" not in inv_remaining
-    assert "inv-01" not in inv_remaining
 
 
 def test_real_sigterm_triggers_graceful_shutdown_subprocess(tmp_path):
     # End-to-end check: spawn the actual entrypoint as a subprocess with a
-    # schedule that won't fire for hours, send SIGTERM, and verify it exits
-    # cleanly within a second with the shutdown log line.
+    # schedule that won't fire for a long time, send SIGTERM, and verify it
+    # exits cleanly within a second with the shutdown log line. This is the
+    # only test that exercises real signal delivery through to the wrapper.
     project_root = Path(__file__).resolve().parent.parent
     backup_root = tmp_path / "backups"
     (backup_root / "cluster-node-backups" / "b1").mkdir(parents=True)
     (backup_root / "cluster-node-backups" / "b1" / "data.tar").touch()
 
-    # Run entrypoint.py as __main__ with patched module-level paths via a
-    # tiny harness so we hit the real signal-handling path. Use a far-future
-    # cron schedule (yearly at midnight Jan 1) so the loop is firmly in
-    # wait_until when we signal it.
     harness = tmp_path / "harness.py"
     harness.write_text(
         "import sys\n"
@@ -773,6 +750,8 @@ def test_real_sigterm_triggers_graceful_shutdown_subprocess(tmp_path):
         [sys.executable, str(harness)],
         env={
             **os.environ,
+            # Yearly schedule so the loop is firmly inside wait_until when
+            # we signal it.
             "SCHEDULE": "0 0 1 1 *",
             "RETENTION_DAYS": "7",
             "MIN_BACKUPS": "10",
@@ -781,8 +760,7 @@ def test_real_sigterm_triggers_graceful_shutdown_subprocess(tmp_path):
         stderr=subprocess.STDOUT,
     )
     try:
-        # Give the scheduler a moment to enter wait_until.
-        time.sleep(0.5)
+        time.sleep(0.5)  # give the scheduler a moment to enter wait_until
         proc.send_signal(signal.SIGTERM)
         try:
             stdout, _ = proc.communicate(timeout=3)

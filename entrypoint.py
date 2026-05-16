@@ -9,11 +9,17 @@ next cron firing time computed by :mod:`croniter`.
 Environment variables
 ---------------------
 SCHEDULE
-    5-field cron expression evaluated in UTC. Defaults to ``"0 3 * * *"``
-    (03:00 UTC). The special value ``"0"`` runs the cleanup once and
-    exits, intended for one-shot invocations or when an external
-    scheduler (host cron, systemd timer, Kubernetes ``CronJob``) is
-    already responsible for timing.
+    5-field cron expression evaluated in the timezone given by ``TZ``
+    (default UTC). Defaults to ``"0 3 * * *"`` (03:00 in the configured
+    zone). The special value ``"0"`` runs the cleanup once and exits,
+    intended for one-shot invocations or when an external scheduler
+    (host cron, systemd timer, Kubernetes ``CronJob``) is already
+    responsible for timing.
+TZ
+    IANA timezone name (e.g. ``UTC``, ``Europe/Berlin``,
+    ``America/New_York``) used to interpret ``SCHEDULE``. Defaults to
+    ``UTC``. DST transitions are handled automatically by zoneinfo +
+    croniter. An invalid timezone name fails fast at startup.
 RETENTION_DAYS
     Days to retain a backup. Forwarded to the vendor script as
     ``--retention-period``. Must be a positive integer. Defaults to ``7``.
@@ -32,6 +38,34 @@ DISCOVER_ONCE
     firing. When ``false`` (the default), discovery runs again before
     each firing so newly-added instances are picked up automatically.
     Has no effect when ``DISCOVER_INSTANCES=false``.
+RUN_ON_STARTUP
+    Boolean (``true``/``false``). When ``true``, the wrapper runs the
+    vendor cleanup script once immediately at container start before
+    entering the cron loop, then continues with the normal schedule.
+    Useful for operators who want a fresh cleanup right after deploy
+    without waiting for the next cron firing. Defaults to ``false`` so
+    existing deployments keep their current "wait for cron" behavior.
+    Ignored in one-shot mode (``SCHEDULE="0"``) since the only firing
+    *is* the startup firing.
+DRY_RUN
+    Boolean (``true``/``false``). When ``true``, the wrapper performs
+    discovery, scheduling, and command-building exactly as in a normal
+    run but the vendor subprocess is never launched - the wrapper only
+    logs the argv it would have used. Nothing is read, chmodded, or
+    deleted on the filesystem. Defaults to ``false``.
+
+Startup output
+--------------
+Regardless of ``DISCOVER_ONCE``, the wrapper performs a discovery pass
+at startup whenever ``DISCOVER_INSTANCES=true`` and logs every detected
+instance. This gives operators immediate visibility into what the next
+cron firing will touch instead of having to wait until the first
+firing for the discovery log lines to appear.
+
+The wrapper also logs the application name and version (parsed from
+the ``pyproject.toml`` shipped inside the image) plus the build-time
+git commit hash (``APP_GIT_HASH``) as the very first log line, so the
+image identity is unambiguous in the container logs.
 
 Signal handling
 ---------------
@@ -57,7 +91,9 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
@@ -73,6 +109,27 @@ DEFAULT_RETENTION_DAYS = 7
 DEFAULT_MIN_BACKUPS = 10
 DEFAULT_DISCOVER_INSTANCES = True
 DEFAULT_DISCOVER_ONCE = False
+# Default for RUN_ON_STARTUP is False so existing deployments keep their
+# pre-feature behavior of only firing on the cron schedule. Operators who
+# want a fresh cleanup right after deploy flip this to true explicitly.
+DEFAULT_RUN_ON_STARTUP = False
+# Default for DRY_RUN is False: actually run the vendor script. DRY_RUN=true
+# is opt-in for safe verification (logs the exact command that WOULD have
+# been invoked but skips the subprocess - the wrapper never deletes anything).
+DEFAULT_DRY_RUN = False
+# Default cron timezone is UTC, matching the original behavior. Set the TZ
+# env var (any IANA name such as "Europe/Berlin" or "America/New_York") to
+# interpret SCHEDULE in a different zone. DST transitions are handled by
+# zoneinfo + croniter automatically.
+DEFAULT_TZ = "UTC"
+
+# Path to the pyproject.toml shipped inside the container alongside this
+# entrypoint. Used by get_app_metadata() to log the app name+version at
+# startup so the container's identity (which version is actually running)
+# is visible in the logs without relying on the image tag alone.
+PYPROJECT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "pyproject.toml"
+)
 
 # Sentinel value for SCHEDULE that means "run once and exit" instead of
 # entering the cron loop. Picked because it is unambiguously not a valid
@@ -105,6 +162,36 @@ def setup_logging() -> None:
         datefmt="%Y-%m-%dT%H:%M:%S%z",
         stream=sys.stdout,
     )
+
+
+def get_app_metadata() -> tuple[str, str]:
+    """Return ``(name, version)`` parsed from the shipped ``pyproject.toml``.
+
+    ``pyproject.toml`` is copied into the container image alongside
+    ``entrypoint.py`` (see Dockerfile) so the running container can
+    identify itself in its own logs without relying on the image tag or
+    a separate build-time env var. Falls back to
+    ``("unknown", "unknown")`` if the file is missing or malformed - the
+    wrapper should not refuse to start just because version metadata is
+    unavailable.
+    """
+    try:
+        # Open in binary mode as required by tomllib.
+        with open(PYPROJECT_PATH, "rb") as fh:
+            data = tomllib.load(fh)
+        # The [project] table holds PEP 621 metadata. Use explicit defaults
+        # so a partially-malformed file still yields something printable.
+        project = data.get("project", {})
+        return (
+            project.get("name", "unknown"),
+            project.get("version", "unknown"),
+        )
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        # A missing or broken pyproject.toml is non-fatal for the wrapper;
+        # log at WARNING so the operator can investigate without the
+        # container crash-looping.
+        logging.warning("Could not read %s for version info: %s", PYPROJECT_PATH, exc)
+        return "unknown", "unknown"
 
 
 def _handle_shutdown_signal(signum: int, _frame: object) -> None:
@@ -156,38 +243,61 @@ def _parse_bool_env(var_name: str, raw_value: str) -> bool:
     )
 
 
-def read_config() -> tuple[str, int, int, bool, bool]:
+def _read_bool_env(name: str, default: bool) -> bool:
+    """Look up ``name`` in the environment and parse it via the strict allowlist.
+
+    Returns ``default`` when the variable is unset; otherwise delegates to
+    :func:`_parse_bool_env` so typos like ``"yse"`` surface at startup
+    instead of silently becoming False.
+    """
+    raw = os.environ.get(name, None)
+    return default if raw is None else _parse_bool_env(name, raw)
+
+
+def read_config() -> tuple[str, int, int, bool, bool, bool, bool, ZoneInfo]:
     """Read all wrapper configuration from the environment.
 
     Returns:
-        A 5-tuple
+        An 8-tuple
         ``(schedule, retention_days, min_backups,
-        discover_instances_enabled, discover_once)`` populated from the
-        matching environment variables, falling back to the
-        module-level defaults when a variable is unset.
+        discover_instances_enabled, discover_once, run_on_startup,
+        dry_run, tz)`` populated from the matching environment
+        variables, falling back to the module-level defaults when a
+        variable is unset.
 
     Raises:
         ValueError: If RETENTION_DAYS or MIN_BACKUPS is not a positive
-            integer, or if DISCOVER_INSTANCES/DISCOVER_ONCE is not a
-            recognized boolean.
+            integer, if any of the boolean env vars
+            (DISCOVER_INSTANCES/DISCOVER_ONCE/RUN_ON_STARTUP/DRY_RUN) is
+            not a recognized boolean, or if TZ is not a known IANA
+            timezone name.
     """
     schedule = os.environ.get("SCHEDULE", DEFAULT_SCHEDULE)
     retention_days = int(os.environ.get("RETENTION_DAYS", DEFAULT_RETENTION_DAYS))
     min_backups = int(os.environ.get("MIN_BACKUPS", DEFAULT_MIN_BACKUPS))
 
     # Boolean env vars - parse via the strict allowlist parser so typos fail fast.
-    discover_raw = os.environ.get("DISCOVER_INSTANCES", None)
-    discover_instances_enabled = (
-        DEFAULT_DISCOVER_INSTANCES
-        if discover_raw is None
-        else _parse_bool_env("DISCOVER_INSTANCES", discover_raw)
+    # DISCOVER_INSTANCES: scan for nested NSX instances vs. legacy single-mount.
+    # DISCOVER_ONCE: cache discovery at startup vs. rediscover every firing.
+    # RUN_ON_STARTUP: immediate cleanup pass right after container start.
+    # DRY_RUN: log the would-be vendor argv but never invoke the subprocess.
+    discover_instances_enabled = _read_bool_env(
+        "DISCOVER_INSTANCES", DEFAULT_DISCOVER_INSTANCES
     )
-    once_raw = os.environ.get("DISCOVER_ONCE", None)
-    discover_once = (
-        DEFAULT_DISCOVER_ONCE
-        if once_raw is None
-        else _parse_bool_env("DISCOVER_ONCE", once_raw)
-    )
+    discover_once = _read_bool_env("DISCOVER_ONCE", DEFAULT_DISCOVER_ONCE)
+    run_on_startup = _read_bool_env("RUN_ON_STARTUP", DEFAULT_RUN_ON_STARTUP)
+    dry_run = _read_bool_env("DRY_RUN", DEFAULT_DRY_RUN)
+    # TZ controls the timezone in which SCHEDULE is interpreted. Default is
+    # UTC. Any IANA name accepted by zoneinfo works (Europe/Berlin,
+    # America/New_York, ...). Invalid names fail fast at startup.
+    tz_name = os.environ.get("TZ", DEFAULT_TZ)
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(
+            f"TZ must be a valid IANA timezone name (e.g. 'UTC', 'Europe/Berlin'), "
+            f"got {tz_name!r}"
+        ) from exc
 
     if retention_days <= 0:
         raise ValueError(
@@ -201,6 +311,9 @@ def read_config() -> tuple[str, int, int, bool, bool]:
         min_backups,
         discover_instances_enabled,
         discover_once,
+        run_on_startup,
+        dry_run,
+        tz,
     )
 
 
@@ -292,7 +405,12 @@ def resolve_targets(discover_enabled: bool) -> list[str]:
     return instances
 
 
-def run_cleaner(directory: str, retention_days: int, min_backups: int) -> int:
+def run_cleaner(
+    directory: str,
+    retention_days: int,
+    min_backups: int,
+    dry_run: bool = False,
+) -> int:
     """Invoke the vendor cleanup script once against ``directory`` and return its exit code.
 
     Captures the vendor script's stdout+stderr and re-emits each line
@@ -304,9 +422,15 @@ def run_cleaner(directory: str, retention_days: int, min_backups: int) -> int:
         directory: Absolute path forwarded as ``--dir``.
         retention_days: Value forwarded as ``--retention-period``.
         min_backups: Value forwarded as ``--min-count``.
+        dry_run: When True, skip the vendor subprocess entirely and only
+            log the exact command that WOULD have been invoked. The
+            wrapper never deletes or chmods anything in dry-run mode -
+            useful for verifying multi-instance dispatch, discovery,
+            and argument forwarding without touching the filesystem.
 
     Returns:
-        The vendor script's exit code (``0`` on success).
+        The vendor script's exit code (``0`` on success). In dry-run
+        mode, always ``0`` since no subprocess is launched.
     """
     # Build argv for the vendor script. --dir is supplied by the caller so
     # multi-instance dispatch can target a different folder per call.
@@ -320,6 +444,12 @@ def run_cleaner(directory: str, retention_days: int, min_backups: int) -> int:
         "--min-count",
         str(min_backups),
     ]
+    if dry_run:
+        # Stop here in dry-run mode: log the would-be command at INFO so
+        # the operator can verify it, then short-circuit before any
+        # subprocess (and thus any filesystem mutation) can happen.
+        logging.info("[DRY-RUN] Would invoke cleaner: %s", " ".join(cmd))
+        return 0
     logging.info("Invoking cleaner: %s", " ".join(cmd))
     started = time.monotonic()
     # Capture both streams and merge stderr into stdout so the relative
@@ -345,24 +475,30 @@ def run_cleaner(directory: str, retention_days: int, min_backups: int) -> int:
 
 
 def run_cleaner_for_all(
-    targets: list[str], retention_days: int, min_backups: int
+    targets: list[str],
+    retention_days: int,
+    min_backups: int,
+    dry_run: bool = False,
 ) -> int:
     """Run the vendor cleanup script once per target directory.
 
     Iterates ``targets`` in order, invoking :func:`run_cleaner` for each.
     Continues through the full list even if one instance fails so a
     single broken folder cannot block cleanup of the others. The
-    returned exit code is the worst (largest) non-zero return code
-    seen, mirroring how shell pipelines surface partial failures.
+    returned exit code is the largest non-zero return code seen,
+    mirroring how shell pipelines surface partial failures.
+
+    When ``dry_run`` is True the flag is forwarded to each
+    :func:`run_cleaner` call so no subprocess is ever launched.
     """
-    worst_rc = 0
+    max_rc = 0
     for target in targets:
         # Run each instance independently; do not short-circuit on failure.
-        rc = run_cleaner(target, retention_days, min_backups)
-        # worst_rc starts at 0, so `rc > worst_rc` already excludes successful runs.
-        if rc > worst_rc:
-            worst_rc = rc
-    return worst_rc
+        rc = run_cleaner(target, retention_days, min_backups, dry_run=dry_run)
+        # max_rc starts at 0, so `rc > max_rc` already excludes successful runs.
+        if rc > max_rc:
+            max_rc = rc
+    return max_rc
 
 
 def wait_until(next_fire_at: datetime) -> bool:
@@ -390,6 +526,9 @@ def run_loop(
     min_backups: int,
     discover_enabled: bool,
     discover_once: bool,
+    run_on_startup: bool,
+    dry_run: bool,
+    tz: ZoneInfo,
 ) -> None:
     """Run the cleanup on the given cron schedule until shutdown.
 
@@ -399,7 +538,7 @@ def run_loop(
     in-flight cleanup subprocess is allowed to finish first.
 
     Args:
-        schedule: 5-field cron expression interpreted in UTC.
+        schedule: 5-field cron expression interpreted in the supplied ``tz``.
         retention_days: Value forwarded as ``--retention-period``.
         min_backups: Value forwarded as ``--min-count``.
         discover_enabled: When True, scan the backup root for nested
@@ -408,35 +547,82 @@ def run_loop(
             and reuse the result for every firing; when False, rerun
             discovery before each firing so new instances are detected
             without restarting the container.
+        run_on_startup: When True, run the cleanup immediately at
+            startup (before entering the cron wait) and then continue
+            with the scheduled loop. When False, the first cleanup only
+            happens at the next cron firing.
+        dry_run: When True, the vendor subprocess is never launched;
+            run_cleaner only logs the argv it would have used. The
+            scheduling loop, discovery, and signal handling are
+            otherwise unchanged.
+        tz: Timezone in which ``schedule`` is interpreted. Next-fire
+            datetimes produced by croniter are tz-aware in this zone
+            so the "Next run scheduled at ..." log line shows the
+            operator's local time including DST offset.
     """
     # Construct croniter directly and let its ValueError serve as the
     # validation step; avoids the separate is_valid() pass that would
-    # parse the same expression twice.
+    # parse the same expression twice. Feed it a tz-aware "now" so the
+    # iterator's next-fire datetimes carry the user-configured tz.
     try:
-        itr = croniter(schedule, datetime.now(timezone.utc))
+        itr = croniter(schedule, datetime.now(tz))
     except (ValueError, KeyError) as exc:
         logging.error("Invalid cron expression %r: %s", schedule, exc)
         sys.exit(2)
 
     logging.info(
-        "Starting scheduler: schedule=%r retention_days=%d min_backups=%d "
-        "dir=%s discover_instances=%s discover_once=%s",
+        "Starting scheduler: schedule=%r tz=%s retention_days=%d min_backups=%d "
+        "dir=%s discover_instances=%s discover_once=%s run_on_startup=%s dry_run=%s",
         schedule,
+        tz.key,
         retention_days,
         min_backups,
         BACKUP_DIR,
         discover_enabled,
         discover_once,
+        run_on_startup,
+        dry_run,
     )
 
-    # Cache of resolved targets when DISCOVER_ONCE is true. Populated at
-    # startup so the discovery cost (and the listing log) happens once
-    # and every cron firing reuses the same list. When DISCOVER_ONCE is
-    # false this stays None and we resolve fresh on every firing.
-    cached_targets: list[str] | None = None
-    if discover_enabled and discover_once:
-        logging.info("DISCOVER_ONCE=true - performing one-time discovery at startup.")
-        cached_targets = resolve_targets(discover_enabled=True)
+    # Always perform an initial discovery pass at startup (when enabled)
+    # so the operator immediately sees which instances will be cleaned,
+    # without waiting for the first cron firing. The result is also
+    # reused as the long-lived cache when DISCOVER_ONCE=true and fed
+    # straight into the optional RUN_ON_STARTUP pass below so we don't
+    # redo the scan in the same second.
+    startup_targets: list[str] | None = None
+    if discover_enabled:
+        logging.info("Performing startup discovery pass.")
+        startup_targets = resolve_targets(discover_enabled=True)
+
+    # Optional immediate cleanup right after container start. Reuses the
+    # startup discovery (when available) so we don't scan twice; when
+    # discovery is disabled, fall back to resolve_targets which simply
+    # returns [BACKUP_DIR].
+    if run_on_startup:
+        logging.info(
+            "RUN_ON_STARTUP=true - running cleanup once immediately before entering cron loop."
+        )
+        startup_run_targets = (
+            startup_targets if discover_enabled else resolve_targets(discover_enabled)
+        )
+        if startup_run_targets:
+            run_cleaner_for_all(
+                startup_run_targets, retention_days, min_backups, dry_run=dry_run
+            )
+        else:
+            # Discovery turned up nothing - log loudly so the operator notices
+            # but still continue into the scheduled loop (a fresh mount may
+            # show up later).
+            logging.warning(
+                "RUN_ON_STARTUP=true but no cleanup targets resolved - skipping startup run."
+            )
+        # If a SIGTERM arrived during the startup cleanup, exit immediately
+        # instead of falling through to wait_until just to exit on the next
+        # loop iteration.
+        if _stop_event.is_set():
+            logging.info("Scheduler stopped - graceful shutdown complete.")
+            return
 
     while not _stop_event.is_set():
         next_fire_at = itr.get_next(datetime)
@@ -445,11 +631,11 @@ def run_loop(
             # Shutdown signal arrived during the wait - exit without firing.
             break
 
-        # Resolve which directories to clean for this firing. Use the
-        # startup cache when DISCOVER_ONCE is set, otherwise rediscover
+        # Resolve which directories to clean for this firing. Reuse the
+        # startup discovery when DISCOVER_ONCE is set, otherwise rediscover
         # so new instance folders show up without a container restart.
-        if cached_targets is not None:
-            targets = cached_targets
+        if discover_enabled and discover_once:
+            targets = startup_targets
         else:
             targets = resolve_targets(discover_enabled)
 
@@ -459,7 +645,7 @@ def run_loop(
             logging.warning("No cleanup targets for this run - skipping.")
             continue
 
-        run_cleaner_for_all(targets, retention_days, min_backups)
+        run_cleaner_for_all(targets, retention_days, min_backups, dry_run=dry_run)
     logging.info("Scheduler stopped - graceful shutdown complete.")
 
 
@@ -468,6 +654,15 @@ def main() -> None:
     setup_logging()
     install_signal_handlers()
 
+    # Identify the running image right at the top of the log so that even
+    # a container that fails to start has its version stamped on the very
+    # first line. APP_GIT_HASH is injected at build time by the Dockerfile
+    # (Stage 2 ENV); when running from a checkout outside the container it
+    # falls back to "unknown" which is still useful context.
+    app_name, app_version = get_app_metadata()
+    git_hash = os.environ.get("APP_GIT_HASH", "unknown")
+    logging.info("Starting %s version %s (commit %s)", app_name, app_version, git_hash)
+
     try:
         (
             schedule,
@@ -475,16 +670,36 @@ def main() -> None:
             min_backups,
             discover_enabled,
             discover_once,
+            run_on_startup,
+            dry_run,
+            tz,
         ) = read_config()
     except ValueError as exc:
         logging.error("Configuration error: %s", exc)
         sys.exit(2)
+
+    # Surface the dry-run state at INFO so it is obvious in the logs why
+    # nothing got deleted on this run. Done before mode dispatch so it
+    # applies to both one-shot and scheduled invocations.
+    if dry_run:
+        logging.info(
+            "DRY_RUN=true - vendor cleanup script will NOT be invoked; "
+            "the wrapper will only log what would have run."
+        )
 
     # SCHEDULE="0" is the documented one-shot mode: run once and exit.
     if schedule.strip() == ONE_SHOT_SENTINEL:
         logging.info(
             "SCHEDULE=%s detected - running once and exiting.", ONE_SHOT_SENTINEL
         )
+        # RUN_ON_STARTUP is meaningless in one-shot mode because the only
+        # firing IS the startup firing. Warn (not error) so a user who set
+        # both notices the redundancy without the container refusing to start.
+        if run_on_startup:
+            logging.warning(
+                "RUN_ON_STARTUP=true is redundant when SCHEDULE=%s - ignoring.",
+                ONE_SHOT_SENTINEL,
+            )
         # One-shot still honors discovery so the same multi-instance
         # layout works for ad-hoc runs. DISCOVER_ONCE has no meaningful
         # effect here since there is only one firing.
@@ -492,10 +707,21 @@ def main() -> None:
         if not targets:
             logging.error("No cleanup targets resolved - exiting with code 2.")
             sys.exit(2)
-        exit_code = run_cleaner_for_all(targets, retention_days, min_backups)
+        exit_code = run_cleaner_for_all(
+            targets, retention_days, min_backups, dry_run=dry_run
+        )
         sys.exit(exit_code)
 
-    run_loop(schedule, retention_days, min_backups, discover_enabled, discover_once)
+    run_loop(
+        schedule,
+        retention_days,
+        min_backups,
+        discover_enabled,
+        discover_once,
+        run_on_startup,
+        dry_run,
+        tz,
+    )
 
 
 if __name__ == "__main__":
