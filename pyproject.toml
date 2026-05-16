@@ -1,0 +1,34 @@
+# nsx-backup-cleaner-container packages the VMware-supplied
+# nsx_backup_cleaner.py script into a distroless container image that runs
+# the cleanup periodically (cron expression in env var SCHEDULE) or once
+# (SCHEDULE="0"). Only a tiny wrapper (entrypoint.py) and croniter are
+# added on top of the vendor script.
+
+[project]
+name = "nsx-backup-cleaner-container"
+version = "0.1.0"
+description = "Containerized scheduler around VMware's nsx_backup_cleaner.py for trimming old NSX Manager backups on an SFTP target."
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.13"
+dependencies = [
+    # croniter parses the SCHEDULE env var and computes next-fire times.
+    # It is the only runtime dependency beyond the Python standard library.
+    "croniter==6.2.2",
+]
+
+# PEP 735 dependency groups. Picked up by `uv sync` (installs by default)
+# and excluded from container images via `uv export --no-dev`.
+[dependency-groups]
+dev = [
+    "pytest==9.0.3",
+]
+
+[tool.setuptools]
+# Standalone app - no importable Python package to install; pip install only resolves deps.
+packages = []
+py-modules = []
+
+[tool.pytest.ini_options]
+# Quiet, deterministic test output. Verbose mode is opted into via `pytest -v`.
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
