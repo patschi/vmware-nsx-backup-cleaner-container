@@ -12,7 +12,7 @@ approach before writing code. This avoids wasted effort if the direction needs a
 
 ## The vendor script is off-limits
 
-`scripts/nsx_backup_cleaner.py` is shipped verbatim from a VMware NSX Manager appliance
+`vendor-scripts/nsx_backup_cleaner.py` is shipped verbatim from a VMware NSX Manager appliance
 (`/var/vmware/nsx/file-store/nsx_backup_cleaner.py`). **Do not modify it** - not for lint, not for Python 2/3 cleanup,
 not for refactoring, not for anything. The whole point of this repository is to wrap it as-is. If the behavior of the
 cleanup itself needs to change, that is a VMware concern, not ours.
@@ -44,7 +44,7 @@ SCHEDULE=0 RETENTION_DAYS=7 MIN_BACKUPS=10 \
   uv run python -c "
 import entrypoint
 entrypoint.BACKUP_DIR = '/tmp/nsxtest'
-entrypoint.CLEANER_SCRIPT = 'scripts/nsx_backup_cleaner.py'
+entrypoint.CLEANER_SCRIPT = 'vendor-scripts/nsx_backup_cleaner.py'
 entrypoint.main()
 "
 ```

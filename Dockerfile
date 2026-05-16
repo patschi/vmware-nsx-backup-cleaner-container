@@ -29,7 +29,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.14@sha256:1025398289b62de8269e70c45b91ffa3
 
 # Copy ONLY the dependency manifests first so this expensive layer is
 # cached and reused whenever the lockfile is unchanged. Subsequent code
-# edits (entrypoint.py, scripts/, README) will not bust this layer.
+# edits (entrypoint.py, vendor-scripts/, README) will not bust this layer.
 COPY pyproject.toml uv.lock ./
 
 # Resolve the pre-locked dependency set into a pinned requirements file,
@@ -76,7 +76,7 @@ ENV PYTHONDONTWRITEBYTECODE="1" \
 # Copy application content last and in stable-to-volatile order so the
 # most frequently edited files invalidate the smallest number of layers.
 # The vendor script must not be modified - see project memory.
-COPY scripts/ ./scripts/
+COPY vendor-scripts/ ./vendor-scripts/
 COPY entrypoint.py ./
 COPY README.md ./
 
@@ -84,6 +84,6 @@ COPY README.md ./
 VOLUME ["/backups"]
 
 # Launch via the wrapper which reads SCHEDULE/RETENTION_DAYS/MIN_BACKUPS
-# from the environment and invokes scripts/nsx_backup_cleaner.py either
+# from the environment and invokes vendor-scripts/nsx_backup_cleaner.py either
 # once (SCHEDULE=0) or on the configured cron schedule.
 ENTRYPOINT ["python", "entrypoint.py"]

@@ -32,7 +32,7 @@ should not be interrupted in the middle of a delete).
 Notes
 -----
 The backup directory is hardcoded to ``/backups``; bind-mount the SFTP
-NSX backup root there. The vendor script ``scripts/nsx_backup_cleaner.py``
+NSX backup root there. The vendor script ``vendor-scripts/nsx_backup_cleaner.py``
 is invoked unchanged as a subprocess and its stdout/stderr stream through
 this wrapper's standard streams.
 """
@@ -52,7 +52,7 @@ from croniter import croniter
 BACKUP_DIR = "/backups"
 
 # Path to the vendor cleanup script (copied verbatim from the NSX Manager appliance).
-CLEANER_SCRIPT = "/app/scripts/nsx_backup_cleaner.py"
+CLEANER_SCRIPT = "/app/vendor-scripts/nsx_backup_cleaner.py"
 
 # Default schedule fires once a day at 03:00 UTC.
 DEFAULT_SCHEDULE = "0 3 * * *"

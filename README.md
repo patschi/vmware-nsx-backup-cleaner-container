@@ -149,12 +149,12 @@ The `Dockerfile` uses a two-stage build:
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup, testing
-(`uv run pytest`), and the rule that the vendor script under `scripts/`
+(`uv run pytest`), and the rule that the vendor script under `vendor-scripts/`
 must never be modified.
 
 ## License
 
-The vendor script `scripts/nsx_backup_cleaner.py` is the property of
+The vendor script `vendor-scripts/nsx_backup_cleaner.py` is the property of
 VMware / Broadcom and is included here as shipped on the NSX Manager
 appliance. The wrapper code and packaging in this repository are
 released under GPL-3.0-or-later.

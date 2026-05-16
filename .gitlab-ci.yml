@@ -15,10 +15,10 @@ variables:
   GHCR_IMAGE: "ghcr.io/patschi/vmware-nsx-backup-cleaner-container"
   GITHUB_PROJECT_URL: "https://github.com/patschi/vmware-nsx-backup-cleaner-container"
   # Exclude the vendor cleanup script and the test suite from SAST.
-  # scripts/ is VMware-supplied code that must not be modified, so any
-  # SAST findings there are not actionable. tests/ uses mock + Popen
-  # patterns SAST tends to flag without value.
-  SAST_EXCLUDED_PATHS: "scripts, tests"
+  # vendor-scripts/ is VMware-supplied code that must not be modified,
+  # so any SAST findings there are not actionable. tests/ uses mock +
+  # Popen patterns SAST tends to flag without value.
+  SAST_EXCLUDED_PATHS: "vendor-scripts, tests"
   # uv version used in all lint jobs. Renovate tracks this as the same
   # ghcr.io/astral-sh/uv Docker dep as the Dockerfile COPY --from line
   # (see customManagers in renovate.json), so both values are structurally
@@ -116,7 +116,7 @@ stages:
       when: always
     - when: never
 
-# Lint only the wrapper. scripts/nsx_backup_cleaner.py is vendor code
+# Lint only the wrapper. vendor-scripts/nsx_backup_cleaner.py is vendor code
 # (copied verbatim from VMware's NSX Manager appliance) and is
 # intentionally excluded from lint checks.
 lint-ruff-check:
@@ -138,7 +138,7 @@ lint-ruff-format:
 
 # Run the pytest suite against entrypoint.py. uv sync installs both the
 # runtime dep (croniter) and the dev dep (pytest) from the pinned lockfile.
-# Tests deliberately do not exercise scripts/nsx_backup_cleaner.py since
+# Tests deliberately do not exercise vendor-scripts/nsx_backup_cleaner.py since
 # that file is vendor code we cannot modify in response to test failures.
 test-pytest:
   extends: .uv-base
@@ -241,7 +241,7 @@ push-container-gitlab:
         - "pyproject.toml"
         - "uv.lock"
         - ".gitlab-ci.yml"
-        - "scripts/**"
+        - "vendor-scripts/**"
       when: always
     - when: never
 
@@ -275,6 +275,6 @@ push-container-ghcr:
         - "pyproject.toml"
         - "uv.lock"
         - ".gitlab-ci.yml"
-        - "scripts/**"
+        - "vendor-scripts/**"
       when: always
     - when: never

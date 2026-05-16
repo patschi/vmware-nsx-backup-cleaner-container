@@ -274,7 +274,7 @@ def _run_cleanup(backup_root: Path, retention_days: int, min_backups: int) -> in
         mock.patch.object(
             entrypoint,
             "CLEANER_SCRIPT",
-            str(project_root / "scripts" / "nsx_backup_cleaner.py"),
+            str(project_root / "vendor-scripts" / "nsx_backup_cleaner.py"),
         ),
     ):
         return entrypoint.run_cleaner(retention_days, min_backups)
@@ -400,7 +400,7 @@ def test_real_sigterm_triggers_graceful_shutdown_subprocess(tmp_path):
         f"sys.path.insert(0, {str(project_root)!r})\n"
         "import entrypoint\n"
         f"entrypoint.BACKUP_DIR = {str(backup_root)!r}\n"
-        f"entrypoint.CLEANER_SCRIPT = {str(project_root / 'scripts' / 'nsx_backup_cleaner.py')!r}\n"
+        f"entrypoint.CLEANER_SCRIPT = {str(project_root / 'vendor-scripts' / 'nsx_backup_cleaner.py')!r}\n"
         "entrypoint.main()\n",
     )
     proc = subprocess.Popen(
