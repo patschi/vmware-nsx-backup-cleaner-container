@@ -128,9 +128,7 @@ def read_config() -> tuple[str, int, int]:
             f"RETENTION_DAYS must be a positive integer, got {retention_days!r}"
         )
     if min_backups <= 0:
-        raise ValueError(
-            f"MIN_BACKUPS must be a positive integer, got {min_backups!r}"
-        )
+        raise ValueError(f"MIN_BACKUPS must be a positive integer, got {min_backups!r}")
     return schedule, retention_days, min_backups
 
 
@@ -160,7 +158,9 @@ def run_cleaner(retention_days: int, min_backups: int) -> int:
     # capture_output=False so the vendor script's prints stream live to our stdout.
     result = subprocess.run(cmd, check=False)
     duration = time.monotonic() - started
-    logging.info("Cleaner finished in %.2fs with exit code %d", duration, result.returncode)
+    logging.info(
+        "Cleaner finished in %.2fs with exit code %d", duration, result.returncode
+    )
     return result.returncode
 
 
@@ -207,7 +207,10 @@ def run_loop(schedule: str, retention_days: int, min_backups: int) -> None:
 
     logging.info(
         "Starting scheduler: schedule=%r retention_days=%d min_backups=%d dir=%s",
-        schedule, retention_days, min_backups, BACKUP_DIR,
+        schedule,
+        retention_days,
+        min_backups,
+        BACKUP_DIR,
     )
     while not _stop_event.is_set():
         next_fire_at = itr.get_next(datetime)
@@ -232,7 +235,9 @@ def main() -> None:
 
     # SCHEDULE="0" is the documented one-shot mode: run once and exit.
     if schedule.strip() == ONE_SHOT_SENTINEL:
-        logging.info("SCHEDULE=%s detected - running once and exiting.", ONE_SHOT_SENTINEL)
+        logging.info(
+            "SCHEDULE=%s detected - running once and exiting.", ONE_SHOT_SENTINEL
+        )
         exit_code = run_cleaner(retention_days, min_backups)
         sys.exit(exit_code)
 

@@ -33,6 +33,7 @@ def _reset_stop_event():
 # read_config
 # ---------------------------------------------------------------------------
 
+
 def test_read_config_uses_defaults_when_env_unset(monkeypatch):
     # Strip the relevant env vars so defaults apply.
     for var in ("SCHEDULE", "RETENTION_DAYS", "MIN_BACKUPS"):
@@ -55,8 +56,12 @@ def test_read_config_honors_env_overrides(monkeypatch):
 
 @pytest.mark.parametrize(
     "var,value",
-    [("RETENTION_DAYS", "0"), ("RETENTION_DAYS", "-1"),
-     ("MIN_BACKUPS", "0"), ("MIN_BACKUPS", "-3")],
+    [
+        ("RETENTION_DAYS", "0"),
+        ("RETENTION_DAYS", "-1"),
+        ("MIN_BACKUPS", "0"),
+        ("MIN_BACKUPS", "-3"),
+    ],
 )
 def test_read_config_rejects_non_positive_integers(monkeypatch, var, value):
     monkeypatch.setenv(var, value)
@@ -77,17 +82,23 @@ def test_read_config_rejects_non_numeric(monkeypatch):
 # run_cleaner / subprocess invocation
 # ---------------------------------------------------------------------------
 
+
 def test_run_cleaner_builds_expected_argv():
     # Stub subprocess.run so we capture the command without executing anything.
     fake_result = mock.Mock(returncode=0)
-    with mock.patch.object(entrypoint.subprocess, "run", return_value=fake_result) as run:
+    with mock.patch.object(
+        entrypoint.subprocess, "run", return_value=fake_result
+    ) as run:
         rc = entrypoint.run_cleaner(retention_days=3, min_backups=11)
     assert rc == 0
     (called_cmd,), _ = run.call_args
     # argv must include the hardcoded --dir, the vendor script, and the
     # forwarded retention/min-count values - in that exact form.
     assert called_cmd[1] == entrypoint.CLEANER_SCRIPT
-    assert "--dir" in called_cmd and called_cmd[called_cmd.index("--dir") + 1] == entrypoint.BACKUP_DIR
+    assert (
+        "--dir" in called_cmd
+        and called_cmd[called_cmd.index("--dir") + 1] == entrypoint.BACKUP_DIR
+    )
     assert "--retention-period" in called_cmd
     assert called_cmd[called_cmd.index("--retention-period") + 1] == "3"
     assert "--min-count" in called_cmd
@@ -104,12 +115,15 @@ def test_run_cleaner_returns_subprocess_exit_code():
 # main / one-shot dispatch
 # ---------------------------------------------------------------------------
 
+
 def test_main_one_shot_runs_cleaner_once_and_exits(monkeypatch):
     monkeypatch.setenv("SCHEDULE", entrypoint.ONE_SHOT_SENTINEL)
     monkeypatch.setenv("RETENTION_DAYS", "7")
     monkeypatch.setenv("MIN_BACKUPS", "10")
-    with mock.patch.object(entrypoint, "run_cleaner", return_value=0) as runner, \
-         pytest.raises(SystemExit) as exc:
+    with (
+        mock.patch.object(entrypoint, "run_cleaner", return_value=0) as runner,
+        pytest.raises(SystemExit) as exc,
+    ):
         entrypoint.main()
     runner.assert_called_once_with(7, 10)
     assert exc.value.code == 0
@@ -119,8 +133,10 @@ def test_main_propagates_cleaner_exit_code_in_one_shot(monkeypatch):
     monkeypatch.setenv("SCHEDULE", "0")
     monkeypatch.setenv("RETENTION_DAYS", "7")
     monkeypatch.setenv("MIN_BACKUPS", "10")
-    with mock.patch.object(entrypoint, "run_cleaner", return_value=5), \
-         pytest.raises(SystemExit) as exc:
+    with (
+        mock.patch.object(entrypoint, "run_cleaner", return_value=5),
+        pytest.raises(SystemExit) as exc,
+    ):
         entrypoint.main()
     assert exc.value.code == 5
 
@@ -137,6 +153,7 @@ def test_main_exits_with_2_on_bad_config(monkeypatch):
 # run_loop / invalid cron rejection
 # ---------------------------------------------------------------------------
 
+
 def test_run_loop_rejects_invalid_cron():
     with pytest.raises(SystemExit) as exc:
         entrypoint.run_loop("not a cron expr", 7, 10)
@@ -146,6 +163,7 @@ def test_run_loop_rejects_invalid_cron():
 # ---------------------------------------------------------------------------
 # wait_until
 # ---------------------------------------------------------------------------
+
 
 def test_wait_until_returns_false_on_normal_timeout():
     # Pick a target ~0.2s in the future so the wait actually returns quickly.
@@ -187,6 +205,7 @@ def test_wait_until_past_target_returns_event_state():
 # Signal handler wires through to _stop_event
 # ---------------------------------------------------------------------------
 
+
 def test_handle_shutdown_signal_sets_stop_event():
     assert not entrypoint._stop_event.is_set()
     entrypoint._handle_shutdown_signal(signal.SIGTERM, None)
@@ -209,6 +228,7 @@ def test_install_signal_handlers_registers_sigterm_and_sigint():
 # ---------------------------------------------------------------------------
 # Full graceful-shutdown path: real SIGTERM interrupts a real subprocess wait
 # ---------------------------------------------------------------------------
+
 
 def test_run_loop_exits_cleanly_when_stop_event_set(monkeypatch):
     # Schedule that would fire in ~1 minute; we set _stop_event immediately
@@ -249,10 +269,14 @@ def _make_backup(parent: Path, name: str, age_days: float) -> Path:
 def _run_cleanup(backup_root: Path, retention_days: int, min_backups: int) -> int:
     """Invoke entrypoint.run_cleaner against `backup_root`."""
     project_root = Path(__file__).resolve().parent.parent
-    with mock.patch.object(entrypoint, "BACKUP_DIR", str(backup_root)), \
-         mock.patch.object(
-             entrypoint, "CLEANER_SCRIPT",
-             str(project_root / "scripts" / "nsx_backup_cleaner.py")):
+    with (
+        mock.patch.object(entrypoint, "BACKUP_DIR", str(backup_root)),
+        mock.patch.object(
+            entrypoint,
+            "CLEANER_SCRIPT",
+            str(project_root / "scripts" / "nsx_backup_cleaner.py"),
+        ),
+    ):
         return entrypoint.run_cleaner(retention_days, min_backups)
 
 
@@ -381,8 +405,12 @@ def test_real_sigterm_triggers_graceful_shutdown_subprocess(tmp_path):
     )
     proc = subprocess.Popen(
         [sys.executable, str(harness)],
-        env={**os.environ, "SCHEDULE": "0 0 1 1 *",
-             "RETENTION_DAYS": "7", "MIN_BACKUPS": "10"},
+        env={
+            **os.environ,
+            "SCHEDULE": "0 0 1 1 *",
+            "RETENTION_DAYS": "7",
+            "MIN_BACKUPS": "10",
+        },
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )

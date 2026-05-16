@@ -32,3 +32,11 @@ py-modules = []
 # Quiet, deterministic test output. Verbose mode is opted into via `pytest -v`.
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+
+[tool.ruff]
+# scripts/ contains the vendor VMware script shipped as-is from the NSX
+# Manager appliance. It is intentionally untouched and would otherwise
+# emit a flood of irrelevant lint findings (Python 2 idioms, getopt
+# style, etc.). extend-exclude keeps the rest of ruff's defaults in
+# effect (e.g. .venv, build/, .git) while adding scripts/ to them.
+extend-exclude = ["scripts"]

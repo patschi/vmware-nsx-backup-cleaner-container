@@ -57,7 +57,7 @@ FROM gcr.io/distroless/python3-debian13:latest
 ARG GIT_HASH=unknown
 ARG BASE_VERSION=0.1.0
 LABEL org.opencontainers.image.version="${BASE_VERSION}+${GIT_HASH}"
-LABEL org.opencontainers.image.description="Cron-driven container wrapping VMware's nsx_backup_cleaner.py for periodic cleanup of old NSX Manager backups on an SFTP target."
+LABEL org.opencontainers.image.description="Cron-driven container wrapping the VMware nsx_backup_cleaner.py script for periodic cleanup of old NSX Manager backups on an SFTP target."
 
 WORKDIR /app
 
