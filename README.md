@@ -36,11 +36,13 @@ All configuration is done through environment variables. The backup root
 inside the container is hardcoded to `/backups`; bind-mount your SFTP
 backup directory there.
 
-| Variable         | Default     | Description                                                                                                                   |
-| ---------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `SCHEDULE`       | `0 3 * * *` | 5-field cron expression in UTC. Special value `0` runs the cleanup **once** and exits (useful for one-shot or external cron). |
-| `RETENTION_DAYS` | `7`         | Days to retain a backup. Mapped to `--retention-period`.                                                                      |
-| `MIN_BACKUPS`    | `10`        | Minimum number of backups always kept per folder. Mapped to `--min-count`.                                                    |
+| Variable             | Default     | Description                                                                                                                                                                                                                                            |
+| -------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SCHEDULE`           | `0 3 * * *` | 5-field cron expression in UTC. Special value `0` runs the cleanup **once** and exits (useful for one-shot or external cron).                                                                                                                          |
+| `RETENTION_DAYS`     | `7`         | Days to retain a backup. Mapped to `--retention-period`.                                                                                                                                                                                               |
+| `MIN_BACKUPS`        | `10`        | Minimum number of backups always kept per folder. Mapped to `--min-count`.                                                                                                                                                                             |
+| `DISCOVER_INSTANCES` | `true`      | When `true`, scan for nested NSX backup **instance folders** and run the vendor script for each. When `false`, the backup root is used directly as the only target (legacy single-instance behavior). Accepts `true/false`, `1/0`, `yes/no`, `on/off`. |
+| `DISCOVER_ONCE`      | `false`     | When `true`, discovery runs **once at startup** and the result is reused for every cron firing. When `false`, discovery re-runs before every firing so newly-added instances are picked up automatically. No effect when `DISCOVER_INSTANCES=false`.   |
 
 ## Mounts
 
@@ -53,6 +55,38 @@ That directory must contain the `cluster-node-backups/` and/or
 - Container path: `/backups` (hardcoded).
 - Mode: read-write. The cleanup script does `chmod` on files and then
   deletes them with `rm`/`rmtree`.
+
+### Multi-instance layouts
+
+If multiple NSX Manager clusters write to the same SFTP target, you
+typically end up with one folder per cluster under the backup root:
+
+```text
+/srv/sftp/nsx/backups/
+├── nsx-at/                  # NSX instance A
+│   ├── cluster-node-backups/
+│   └── inventory-summary/
+└── nsx-de/                  # NSX instance B
+    ├── cluster-node-backups/
+    └── inventory-summary/
+```
+
+With `DISCOVER_INSTANCES=true` (the default) the wrapper scans
+`/backups` and runs the vendor cleanup script once per detected
+instance. Each detected instance is logged at INFO level on every
+firing so you can verify the auto-detection is matching what you
+expect. Folders that don't contain `cluster-node-backups/` or
+`inventory-summary/` (for example `@Recently-Snapshot/`) are skipped
+because the vendor script itself would reject them anyway.
+
+If `/backups` already contains `cluster-node-backups/` /
+`inventory-summary/` directly (the legacy single-instance layout), the
+wrapper detects that and uses `/backups` as the only target without
+scanning further.
+
+Set `DISCOVER_INSTANCES=false` to fully disable detection and force
+the wrapper back to its original behavior of passing `/backups`
+straight to the vendor script.
 
 ## Usage
 
@@ -70,9 +104,11 @@ services:
     cap_drop:
       - ALL
     environment:
-      SCHEDULE: "0 3 * * *"     # 03:00 UTC daily
+      SCHEDULE: "0 3 * * *"      # 03:00 UTC daily
       RETENTION_DAYS: "7"
       MIN_BACKUPS: "10"
+      DISCOVER_INSTANCES: "true" # auto-detect nested NSX instance folders
+      DISCOVER_ONCE: "false"     # re-detect before every firing
     volumes:
       - /srv/sftp/nsx/backups:/backups
 ```
