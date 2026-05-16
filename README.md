@@ -35,6 +35,29 @@ supported way to delete old ones. It keeps any backup younger than the
 retention window and never deletes below a per-folder minimum count.
 This container schedules that script for you.
 
+### Example Log Output
+
+```text
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO] Starting vmware-nsx-backup-cleaner-container version 0.1.0 (commit d3d215e1)
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO] Starting scheduler: schedule='0 9 * * *' tz=Europe/Vienna retention_days=7 min_backups=10 dir=/backups discover_instances=True discover_once=False run_on_startup=True dry_run=False
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO] Performing startup discovery pass.
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO] Discovered 2 NSX backup instance(s) under /backups:
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO]   - /backups/nsx-at
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO]   - /backups/nsx-de
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO] RUN_ON_STARTUP=true - running cleanup once immediately before entering cron loop.
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO] Invoking cleaner: /usr/bin/python /app/vendor-scripts/nsx_backup_cleaner.py --dir /backups/nsx-at --retention-period 7 --min-count 10
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [DEBUG] [vendor] Keeping the following backup files for folder /backups/nsx-at/inventory-summary
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [DEBUG] [vendor] /backups/nsx-at/inventory-summary/4.2.3.0.0.24866352-IPv4-xxx-192.168.0.1/inventory-2026-05-03T00_02_52UTC.json
+[...]
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO] Cleaner finished in 0.24s with exit code 0
+nsx-backup-cleaner  | 2026-05-16T15:07:24+0200 [INFO] Invoking cleaner: /usr/bin/python /app/vendor-scripts/nsx_backup_cleaner.py --dir /backups/nsx-de --retention-period 7 --min-count 10
+nsx-backup-cleaner  | 2026-05-16T15:07:25+0200 [DEBUG] [vendor] Keeping the following backup files for folder /backups/nsx-de/inventory-summary
+nsx-backup-cleaner  | 2026-05-16T15:07:25+0200 [DEBUG] [vendor] /backups/nsx-de/inventory-summary/4.2.3.1.0.24954571-IPv4-xxx-192.168.1.1/inventory-2026-02-25T00_31_05UTC.json
+[...]
+nsx-backup-cleaner  | 2026-05-16T15:07:25+0200 [INFO] Cleaner finished in 0.33s with exit code 0
+nsx-backup-cleaner  | 2026-05-16T15:07:25+0200 [INFO] Next run scheduled at 2026-05-17T09:00:00+02:00
+```
+
 ## Configuration
 
 All configuration is done through environment variables. The backup root
