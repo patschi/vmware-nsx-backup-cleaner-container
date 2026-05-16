@@ -37,7 +37,11 @@ include:
 # Ensure container scanning targets the image just built, not a potentially stale latest.
 # optional: true allows the job to run on scheduled pipelines even when
 # push-container-gitlab is skipped (it will scan the existing :latest image).
+# Override the template's default stage (`test`) so this job runs AFTER
+# the image is pushed - otherwise GitLab rejects the `needs` reference as
+# pointing to a later stage.
 container_scanning:
+  stage: scan-container
   needs:
     - job: push-container-gitlab
       optional: true
@@ -71,6 +75,11 @@ stages:
   - lint
   - test
   - build-container
+  # scan-container runs after the container is built and pushed so
+  # container_scanning can `needs` the just-built image. Keeping it as a
+  # dedicated post-build stage lets pytest (in `test`) gate the build
+  # without delaying the scan into pytest's pipeline slot.
+  - scan-container
 
 # Shared base for all lint jobs: pinned Python image, uv install, and uv cache.
 # Child jobs reference this before_script with !reference so they can append
