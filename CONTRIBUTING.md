@@ -69,13 +69,13 @@ CI runs the same commands on every MR via `.gitlab-ci.yml`.
 ### Building the container
 
 ```bash
-docker build -t nsx-backup-cleaner-container:latest .
+docker build -t vmware-nsx-backup-cleaner-container:latest .
 ```
 
 To force a clean build after changing `pyproject.toml`:
 
 ```bash
-docker build --no-cache -t nsx-backup-cleaner-container:latest .
+docker build --no-cache -t vmware-nsx-backup-cleaner-container:latest .
 ```
 
 ## Submitting changes

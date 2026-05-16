@@ -1,4 +1,4 @@
-# nsx-backup-cleaner-container packages the VMware-supplied
+# vmware-nsx-backup-cleaner-container packages the VMware-supplied
 # nsx_backup_cleaner.py script into a distroless container image that runs
 # the cleanup periodically (cron expression in env var SCHEDULE) or once
 # (SCHEDULE="0"). Only a tiny wrapper (entrypoint.py) and croniter are

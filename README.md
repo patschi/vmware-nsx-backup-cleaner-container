@@ -105,7 +105,7 @@ Right after the container starts, the wrapper logs:
    commit hash. Example:
 
     ```text
-    [INFO] Starting nsx-backup-cleaner-container version 0.1.0 (commit abc1234)
+    [INFO] Starting vmware-nsx-backup-cleaner-container version 0.1.0 (commit abc1234)
     ```
 
 2. The **scheduler configuration** (active cron schedule, retention,
@@ -257,7 +257,7 @@ services:
 ## Build
 
 ```sh
-docker build -t nsx-backup-cleaner-container:latest .
+docker build -t vmware-nsx-backup-cleaner-container:latest .
 ```
 
 The `Dockerfile` uses a two-stage build:

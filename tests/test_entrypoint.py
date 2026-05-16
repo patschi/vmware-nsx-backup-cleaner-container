@@ -323,18 +323,20 @@ def test_get_app_metadata_reads_shipped_pyproject():
     # The real shipped pyproject.toml must yield a non-"unknown" name and
     # version so the startup log line is informative.
     name, version = entrypoint.get_app_metadata()
-    assert name == "nsx-backup-cleaner-container"
+    assert name == "vmware-nsx-backup-cleaner-container"
     assert version != "unknown"
 
 
 def test_get_app_metadata_falls_back_when_file_unreadable(monkeypatch, tmp_path):
     # A missing/broken pyproject.toml must NOT crash the wrapper; we test
-    # the missing-file path as the canonical failure mode.
+    # the missing-file path as the canonical failure mode. The name is
+    # hardcoded in entrypoint.APP_NAME and therefore stays stable; only
+    # the version falls back to "unknown".
     monkeypatch.setattr(
         entrypoint, "PYPROJECT_PATH", str(tmp_path / "does-not-exist.toml")
     )
     name, version = entrypoint.get_app_metadata()
-    assert name == "unknown"
+    assert name == "vmware-nsx-backup-cleaner-container"
     assert version == "unknown"
 
 
@@ -358,7 +360,7 @@ def test_main_logs_app_name_and_version_at_startup(monkeypatch, caplog):
         entrypoint.main()
     info_messages = [rec.message for rec in caplog.records if rec.levelname == "INFO"]
     assert any(
-        msg.startswith("Starting nsx-backup-cleaner-container version ")
+        msg.startswith("Starting vmware-nsx-backup-cleaner-container version ")
         for msg in info_messages
     ), info_messages
 

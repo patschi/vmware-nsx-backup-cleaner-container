@@ -123,8 +123,14 @@ DEFAULT_DRY_RUN = False
 # zoneinfo + croniter automatically.
 DEFAULT_TZ = "UTC"
 
+# Hardcoded application name used in startup log lines. Kept as a module
+# constant (rather than re-derived from pyproject.toml at runtime) so the
+# logged identity is stable even if pyproject.toml is missing, malformed,
+# or absent from the shipped image.
+APP_NAME = "vmware-nsx-backup-cleaner-container"
+
 # Path to the pyproject.toml shipped inside the container alongside this
-# entrypoint. Used by get_app_metadata() to log the app name+version at
+# entrypoint. Used by get_app_metadata() to log the app version at
 # startup so the container's identity (which version is actually running)
 # is visible in the logs without relying on the image tag alone.
 PYPROJECT_PATH = os.path.join(
@@ -165,33 +171,32 @@ def setup_logging() -> None:
 
 
 def get_app_metadata() -> tuple[str, str]:
-    """Return ``(name, version)`` parsed from the shipped ``pyproject.toml``.
+    """Return ``(name, version)``. Name is hardcoded; version is parsed from
+    the shipped ``pyproject.toml``.
 
     ``pyproject.toml`` is copied into the container image alongside
     ``entrypoint.py`` (see Dockerfile) so the running container can
-    identify itself in its own logs without relying on the image tag or
-    a separate build-time env var. Falls back to
-    ``("unknown", "unknown")`` if the file is missing or malformed - the
-    wrapper should not refuse to start just because version metadata is
-    unavailable.
+    identify its version in its own logs without relying on the image tag
+    or a separate build-time env var. Version falls back to ``"unknown"``
+    if the file is missing or malformed - the wrapper should not refuse
+    to start just because version metadata is unavailable. The name is
+    always returned from the hardcoded ``APP_NAME`` constant.
     """
     try:
         # Open in binary mode as required by tomllib.
         with open(PYPROJECT_PATH, "rb") as fh:
             data = tomllib.load(fh)
-        # The [project] table holds PEP 621 metadata. Use explicit defaults
-        # so a partially-malformed file still yields something printable.
+        # The [project] table holds PEP 621 metadata. Use an explicit
+        # default so a partially-malformed file still yields something
+        # printable.
         project = data.get("project", {})
-        return (
-            project.get("name", "unknown"),
-            project.get("version", "unknown"),
-        )
+        return APP_NAME, project.get("version", "unknown")
     except (OSError, tomllib.TOMLDecodeError) as exc:
         # A missing or broken pyproject.toml is non-fatal for the wrapper;
         # log at WARNING so the operator can investigate without the
         # container crash-looping.
         logging.warning("Could not read %s for version info: %s", PYPROJECT_PATH, exc)
-        return "unknown", "unknown"
+        return APP_NAME, "unknown"
 
 
 def _handle_shutdown_signal(signum: int, _frame: object) -> None:

@@ -1,4 +1,4 @@
-# nsx-backup-cleaner-container - distroless container image.
+# vmware-nsx-backup-cleaner-container - distroless container image.
 #
 # Multi-stage build:
 #   1. Builder stage:  resolves and installs croniter into a staging
