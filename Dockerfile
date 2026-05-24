@@ -50,7 +50,7 @@ RUN uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt && \
 # and its core C libraries - no shell, no package manager, minimal attack
 # surface. The default (non-:nonroot) tag runs as root (UID 0), which is
 # needed to chmod/delete backup files owned by the SFTP user on the host.
-FROM gcr.io/distroless/python3-debian13:latest
+FROM gcr.io/distroless/python3-debian13:latest@sha256:a156791331382d183a569c1714a6c5364d5402e622da5618005308c2adcb4a9c
 
 # Build-time metadata consumed by LABEL/ENV below. BASE_VERSION is read
 # from pyproject.toml by the CI pipeline (see .gitlab-ci.yml); GIT_HASH
