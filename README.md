@@ -204,11 +204,6 @@ services:
     image: ghcr.io/patschi/vmware-nsx-backup-cleaner-container:latest
     container_name: nsx-backup-cleaner
     restart: unless-stopped
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
     environment:
       SCHEDULE: "0 3 * * *"      # 03:00 in the TZ below
       TZ: "UTC"                  # any IANA name, e.g. "Europe/Berlin"
