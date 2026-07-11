@@ -59,13 +59,13 @@
             "automerge": true
         },
         {
-            "description": "Group Python image updates across Dockerfile and CI into one PR. allowedVersions below constrains these to 3.13.x patch updates only.",
-            "matchDepNames": ["python"],
-            "groupName": "python",
+            "description": "Group the whole Python runtime - the distroless base image, the Dockerfile builder image, and the CI python image - into a single 'python-runtime' PR so they always move together and any version drift is visible in one place. The Debian codename and the Python minor are locked in sync via allowedVersions below (Debian 13 Trixie ships Python 3.13). NOTE: Renovate cannot derive the Python minor from the distroless Debian codename (different datasources and versioning schemes), so bumping to a new base OS is a coordinated manual edit - change the distroless tag (python3-debian13 -> python3-debian14) AND the allowedVersions regex (/^3.13/ -> /^3.14/) together in one commit.",
+            "matchDepNames": ["python", "gcr.io/distroless/python3-debian13"],
+            "groupName": "python-runtime",
             "automerge": true
         },
         {
-            "description": "Pin Python to 3.13.x across Dockerfile and CI to stay in sync with distroless/python3-debian13 (Debian Trixie). Bump intentionally when moving to a new distroless base.",
+            "description": "Pin the Python image to 3.13.x across Dockerfile and CI so it never drifts ahead of the distroless python3-debian13 base (Debian Trixie ships Python 3.13). This regex is one half of the base-version knob - see the python-runtime group above; bump it in lockstep with the distroless tag.",
             "matchManagers": ["dockerfile", "gitlabci"],
             "matchDepNames": ["python"],
             "allowedVersions": "/^3\\.13/"
@@ -85,12 +85,11 @@
             "automerge": true
         },
         {
-            "description": "Automerge distroless base image updates - no shell or userland, minimal risk. separateMajorMinor disabled because tags do not follow semver.",
+            "description": "distroless tags do not follow semver, so disable separateMajorMinor to keep the single python3-debian13 stream as one update. Grouping and automerge come from the python-runtime rule above, which keeps this base image in the same PR as the Python interpreter it must match.",
             "matchDatasources": ["docker"],
             "matchDepNames": ["gcr.io/distroless/python3-debian13"],
             "matchFileNames": ["Dockerfile"],
-            "separateMajorMinor": false,
-            "automerge": true
+            "separateMajorMinor": false
         },
         {
             "description": "Wait 3 days after a PyPI release before raising a PR - avoids packages yanked shortly after publishing.",
