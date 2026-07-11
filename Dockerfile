@@ -27,7 +27,7 @@ WORKDIR /build
 # uv binary, pinned to a specific tag+SHA for reproducible builds. Renovate
 # keeps this digest in sync with the UV_VERSION pin in .gitlab-ci.yml
 # (see customManagers in renovate.json).
-COPY --from=ghcr.io/astral-sh/uv:0.11.14@sha256:1025398289b62de8269e70c45b91ffa37c373f38118d7da036fb8bb8efc85d97 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa /uv /usr/local/bin/uv
 
 # Copy ONLY the dependency manifests first so this expensive layer is
 # cached and reused whenever the lockfile is unchanged. Subsequent code
