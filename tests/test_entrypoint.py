@@ -215,7 +215,14 @@ def test_run_cleaner_for_all_forwards_dry_run_flag():
 # ---------------------------------------------------------------------------
 
 
-def _make_instance(parent: Path, name: str, markers=("cluster-node-backups",)) -> Path:
+# Marker subfolder names for the version the imported entrypoint resolved.
+# Discovery-logic tests use these instead of hardcoded 4.1/4.2 literals so
+# they exercise the discovery algorithm regardless of which NSX_VERSION the
+# module defaulted to. MARKER_A/MARKER_B are the two category markers.
+MARKER_A, MARKER_B = entrypoint.NSX_INSTANCE_MARKERS
+
+
+def _make_instance(parent: Path, name: str, markers=(MARKER_A,)) -> Path:
     """Create an NSX-instance-shaped folder under `parent` with given marker subdirs."""
     inst = parent / name
     inst.mkdir(parents=True)
@@ -229,9 +236,9 @@ def test_is_nsx_instance_dir_recognizes_markers(tmp_path):
     # without either marker (or non-existent paths) do not. Both sides of
     # the predicate are covered here to keep the surface small.
     cn = tmp_path / "cn-only"
-    (cn / "cluster-node-backups").mkdir(parents=True)
+    (cn / MARKER_A).mkdir(parents=True)
     inv = tmp_path / "inv-only"
-    (inv / "inventory-summary").mkdir(parents=True)
+    (inv / MARKER_B).mkdir(parents=True)
     noise = tmp_path / "noise"
     noise.mkdir()
     assert entrypoint.is_nsx_instance_dir(str(cn)) is True
@@ -242,8 +249,8 @@ def test_is_nsx_instance_dir_recognizes_markers(tmp_path):
 
 def test_discover_instances_returns_root_when_root_is_an_instance(tmp_path):
     # Legacy single-instance layout: backup root itself contains the markers.
-    (tmp_path / "cluster-node-backups").mkdir()
-    (tmp_path / "inventory-summary").mkdir()
+    (tmp_path / MARKER_A).mkdir()
+    (tmp_path / MARKER_B).mkdir()
     assert entrypoint.discover_instances(str(tmp_path)) == [str(tmp_path)]
 
 
@@ -251,10 +258,54 @@ def test_discover_instances_finds_nested_instances(tmp_path):
     # Multi-instance layout matching real NAS examples: nsx-at and nsx-de
     # are valid instances; @Recently-Snapshot is noise that must be skipped.
     _make_instance(tmp_path, "nsx-at")
-    _make_instance(tmp_path, "nsx-de", markers=("inventory-summary",))
+    _make_instance(tmp_path, "nsx-de", markers=(MARKER_B,))
     (tmp_path / "@Recently-Snapshot").mkdir()
     found = entrypoint.discover_instances(str(tmp_path))
     assert found == [str(tmp_path / "nsx-at"), str(tmp_path / "nsx-de")]
+
+
+# ---------------------------------------------------------------------------
+# NSX version -> marker selection
+# ---------------------------------------------------------------------------
+
+
+def test_marker_map_covers_known_versions():
+    # The vendor script renamed the backup categories between 4.1 and 4.2;
+    # each version must map to its exact category subfolder names so discovery
+    # matches the vendor script shipped in that version's image.
+    assert entrypoint.NSX_INSTANCE_MARKERS_BY_VERSION["4.1"] == (
+        "cluster-node-backups",
+        "inventory-summary",
+    )
+    assert entrypoint.NSX_INSTANCE_MARKERS_BY_VERSION["4.2"] == (
+        "nsx-bkp",
+        "nsx-inv",
+    )
+
+
+def test_resolved_markers_match_configured_version():
+    # The module-level NSX_INSTANCE_MARKERS the wrapper actually uses must be
+    # the set mapped to the resolved NSX_VERSION - no drift between the two.
+    assert (
+        entrypoint.NSX_INSTANCE_MARKERS
+        == entrypoint.NSX_INSTANCE_MARKERS_BY_VERSION[entrypoint.NSX_VERSION]
+    )
+
+
+def test_default_version_is_highest_known():
+    # The fallback version (used when NSX_VERSION is unset) must be the highest
+    # known version so a bare local run stays aligned with the `latest` image.
+    highest = max(
+        entrypoint.NSX_INSTANCE_MARKERS_BY_VERSION,
+        key=lambda v: [int(part) for part in v.split(".")],
+    )
+    assert entrypoint.DEFAULT_NSX_VERSION == highest
+
+
+def test_cleaner_script_path_is_version_independent():
+    # The vendor script is flattened to /app/vendor-scripts/ in the image
+    # regardless of version, so the wrapper's path must not embed a version.
+    assert entrypoint.CLEANER_SCRIPT == "/app/vendor-scripts/nsx_backup_cleaner.py"
 
 
 def test_resolve_targets_returns_backup_dir_when_discovery_disabled(monkeypatch):
@@ -703,13 +754,26 @@ def _make_backup(parent: Path, name: str, age_days: float) -> Path:
     return path
 
 
-def test_vendor_smoke_keeps_fresh_deletes_old(tmp_path):
+# Primary backup-category subfolder per NSX version. The vendor script only
+# processes a root that contains its version's category subfolders, so each
+# smoke run must pair the right vendor script with the right category name.
+VENDOR_CATEGORY_BY_VERSION = {
+    "4.1": "cluster-node-backups",
+    "4.2": "nsx-bkp",
+}
+
+
+@pytest.mark.parametrize(
+    "nsx_version, category", sorted(VENDOR_CATEGORY_BY_VERSION.items())
+)
+def test_vendor_smoke_keeps_fresh_deletes_old(tmp_path, nsx_version, category):
     # End-to-end: spawn the actual vendor script via run_cleaner against a
     # fake NSX tree with mixed-age backups. After cleanup, every fresh
     # backup must survive and every old backup must be gone. This is the
-    # canonical "the wrapper actually drives the vendor" smoke test.
+    # canonical "the wrapper actually drives the vendor" smoke test, run
+    # once per shipped vendor script version.
     root = tmp_path / "backups"
-    cluster = root / "cluster-node-backups" / "cluster-1"
+    cluster = root / category / "cluster-1"
     cluster.mkdir(parents=True)
     for i in range(5):
         _make_backup(cluster, f"old-{i:02d}", age_days=30)
@@ -720,7 +784,7 @@ def test_vendor_smoke_keeps_fresh_deletes_old(tmp_path):
     with mock.patch.object(
         entrypoint,
         "CLEANER_SCRIPT",
-        str(project_root / "vendor-scripts" / "nsx_backup_cleaner.py"),
+        str(project_root / "vendor-scripts" / nsx_version / "nsx_backup_cleaner.py"),
     ):
         rc = entrypoint.run_cleaner(str(root), retention_days=7, min_backups=3)
     assert rc == 0
@@ -736,16 +800,25 @@ def test_real_sigterm_triggers_graceful_shutdown_subprocess(tmp_path):
     # only test that exercises real signal delivery through to the wrapper.
     project_root = Path(__file__).resolve().parent.parent
     backup_root = tmp_path / "backups"
-    (backup_root / "cluster-node-backups" / "b1").mkdir(parents=True)
-    (backup_root / "cluster-node-backups" / "b1" / "data.tar").touch()
+    (backup_root / MARKER_A / "b1").mkdir(parents=True)
+    (backup_root / MARKER_A / "b1" / "data.tar").touch()
 
+    # Ship the vendor script matching the module's resolved NSX version so the
+    # baked-in markers and the on-disk script agree (the cleaner is never
+    # actually invoked here - the yearly schedule keeps it in wait_until).
+    vendor_script = (
+        project_root
+        / "vendor-scripts"
+        / entrypoint.NSX_VERSION
+        / "nsx_backup_cleaner.py"
+    )
     harness = tmp_path / "harness.py"
     harness.write_text(
         "import sys\n"
         f"sys.path.insert(0, {str(project_root)!r})\n"
         "import entrypoint\n"
         f"entrypoint.BACKUP_DIR = {str(backup_root)!r}\n"
-        f"entrypoint.CLEANER_SCRIPT = {str(project_root / 'vendor-scripts' / 'nsx_backup_cleaner.py')!r}\n"
+        f"entrypoint.CLEANER_SCRIPT = {str(vendor_script)!r}\n"
         "entrypoint.main()\n",
     )
     proc = subprocess.Popen(

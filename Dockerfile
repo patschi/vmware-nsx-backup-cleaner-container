@@ -58,6 +58,14 @@ FROM gcr.io/distroless/python3-debian13:latest@sha256:393cdf69ec7a5e217f837f2ff9
 ARG GIT_HASH=unknown
 ARG BASE_VERSION=0.1.0
 
+# NSX major version this image is built for. Selects which vendor-scripts/
+# subfolder is shipped and is baked into the ENV below so the wrapper picks
+# the matching backup-instance markers. The CI pipeline builds one image per
+# vendor-scripts/<version> folder and always passes this explicitly (see
+# .gitlab-ci.yml); the default only helps bare local `docker build` runs and
+# points at the highest supported version (the one tagged `latest`).
+ARG NSX_VERSION=4.2
+
 WORKDIR /app
 
 # Pre-built site-packages from the builder stage. Cached until the
@@ -65,9 +73,11 @@ WORKDIR /app
 COPY --from=builder /opt/site-packages /usr/lib/python3/dist-packages
 
 # Vendor script (rarely changes) kept on its own layer so iterating on
-# wrapper/app metadata does not re-copy it. Project memory: must not be
+# wrapper/app metadata does not re-copy it. Only the selected NSX version's
+# folder is shipped, flattened to /app/vendor-scripts/ so the wrapper's
+# CLEANER_SCRIPT path stays version-independent. Project memory: must not be
 # modified - see CONTRIBUTING.md.
-COPY vendor-scripts/ ./vendor-scripts/
+COPY vendor-scripts/${NSX_VERSION}/ ./vendor-scripts/
 
 # Remaining application files share one layer. pyproject.toml ships here
 # so entrypoint.get_app_metadata() can report the running version at
@@ -79,11 +89,15 @@ COPY pyproject.toml entrypoint.py README.md ./
 # AFTER the COPYs above keeps source layers cached when only the commit
 # hash differs between builds.
 LABEL org.opencontainers.image.version="${BASE_VERSION}+${GIT_HASH}" \
-      org.opencontainers.image.description="Cron-driven container wrapping the VMware nsx_backup_cleaner.py script for periodic cleanup of old NSX Manager backups on an SFTP target."
+      org.opencontainers.image.description="Cron-driven container wrapping the VMware nsx_backup_cleaner.py script for periodic cleanup of old NSX Manager backups on an SFTP target." \
+      com.vmware.nsx.version="${NSX_VERSION}"
 
+# NSX_VERSION is baked into the runtime environment so entrypoint.py selects
+# the backup-instance markers matching the vendor script shipped in this image.
 ENV PYTHONDONTWRITEBYTECODE="1" \
     PYTHONUNBUFFERED="1" \
-    APP_GIT_HASH="${GIT_HASH}"
+    APP_GIT_HASH="${GIT_HASH}" \
+    NSX_VERSION="${NSX_VERSION}"
 
 # Backup root - bind-mount the SFTP server's NSX backup directory here.
 VOLUME ["/backups"]

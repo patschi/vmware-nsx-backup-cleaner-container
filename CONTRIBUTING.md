@@ -12,9 +12,11 @@ approach before writing code. This avoids wasted effort if the direction needs a
 
 ## The vendor script is off-limits
 
-`vendor-scripts/nsx_backup_cleaner.py` is shipped verbatim from a VMware NSX Manager appliance
-(`/var/vmware/nsx/file-store/nsx_backup_cleaner.py`). **Do not modify it** - not for lint, not for Python 2/3 cleanup,
-not for refactoring, not for anything. The whole point of this repository is to wrap it as-is. If the behavior of the
+The `nsx_backup_cleaner.py` scripts under `vendor-scripts/<nsx-version>/` (for example
+`vendor-scripts/4.2/nsx_backup_cleaner.py`) are shipped verbatim from a VMware NSX Manager appliance
+(`/var/vmware/nsx/file-store/nsx_backup_cleaner.py`). One folder per NSX major version is kept because the script
+differs between releases. **Do not modify them** - not for lint, not for Python 2/3 cleanup,
+not for refactoring, not for anything. The whole point of this repository is to wrap them as-is. If the behavior of the
 cleanup itself needs to change, that is a VMware concern, not ours.
 
 All project logic lives in `entrypoint.py`. Anything you'd want to change about *when*, *how*, or *with what arguments*
@@ -38,13 +40,14 @@ uv run python entrypoint.py          # run the wrapper against /backups (must ex
 For a quick ad-hoc test against a fake backup tree:
 
 ```bash
-mkdir -p /tmp/nsxtest/cluster-node-backups/b1
-touch /tmp/nsxtest/cluster-node-backups/b1/data.tar
+# Marker subfolder is version-specific: 4.1 -> cluster-node-backups, 4.2 -> nsx-bkp.
+mkdir -p /tmp/nsxtest/nsx-bkp/b1
+touch /tmp/nsxtest/nsx-bkp/b1/data.tar
 SCHEDULE=0 RETENTION_DAYS=7 MIN_BACKUPS=10 \
   uv run python -c "
 import entrypoint
 entrypoint.BACKUP_DIR = '/tmp/nsxtest'
-entrypoint.CLEANER_SCRIPT = 'vendor-scripts/nsx_backup_cleaner.py'
+entrypoint.CLEANER_SCRIPT = 'vendor-scripts/4.2/nsx_backup_cleaner.py'
 entrypoint.main()
 "
 ```

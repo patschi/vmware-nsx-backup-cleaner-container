@@ -24,16 +24,39 @@ Vendor documentation:
 
 ## What it does
 
-NSX Manager uploads backups to the SFTP server under two subfolders:
+NSX Manager uploads backups to the SFTP server under two subfolders. VMware
+renamed these between NSX major releases, so the exact names depend on which
+version you run:
 
-- `cluster-node-backups/`
-- `inventory-summary/`
+| NSX version | Backup subfolders                             |
+| ----------- | --------------------------------------------- |
+| 4.1         | `cluster-node-backups/`, `inventory-summary/` |
+| 4.2         | `nsx-bkp/`, `nsx-inv/`                         |
 
 Inside each, every backup is its own dated subdirectory. Over time these
 accumulate, and the vendor script `nsx_backup_cleaner.py` is the
 supported way to delete old ones. It keeps any backup younger than the
 retention window and never deletes below a per-folder minimum count.
 This container schedules that script for you.
+
+## NSX version and image tags
+
+The vendor `nsx_backup_cleaner.py` script differs between NSX major versions
+(see the table above), so a separate image is published per version. Pick the
+tag matching your NSX Manager:
+
+| Tag       | NSX version                                             |
+| --------- | ------------------------------------------------------- |
+| `:4.1`    | NSX 4.1                                                  |
+| `:4.2`    | NSX 4.2                                                  |
+| `:latest` | Always the highest available version (currently `:4.2`) |
+
+Each image ships only its version's vendor script and bakes the matching
+backup-instance markers in, so the wrapper's auto-detection works out of the
+box - there is nothing to configure. The startup log line `Targeting NSX <ver>`
+reports which version an image was built for. Pin an explicit `:4.1`/`:4.2` tag
+if you want a version upgrade of your NSX deployment to be a deliberate image
+retag rather than an automatic move when `:latest` advances.
 
 ### Example Log Output
 
@@ -78,8 +101,10 @@ backup directory there.
 ## Mounts
 
 The container only needs one mount: the NSX Manager's SFTP backup root.
-That directory must contain the `cluster-node-backups/` and/or
-`inventory-summary/` subfolders.
+That directory must contain the version's backup subfolders - for NSX 4.1
+`cluster-node-backups/` and/or `inventory-summary/`, for NSX 4.2 `nsx-bkp/`
+and/or `nsx-inv/` (see [NSX version and image tags](#nsx-version-and-image-tags)).
+The examples below use the 4.1 names.
 
 - Host path: wherever the SFTP daemon writes NSX backups (for example
   `/srv/sftp/nsx/backups`).
@@ -106,14 +131,13 @@ With `DISCOVER_INSTANCES=true` (the default) the wrapper scans
 `/backups` and runs the vendor cleanup script once per detected
 instance. Each detected instance is logged at INFO level on every
 firing so you can verify the auto-detection is matching what you
-expect. Folders that don't contain `cluster-node-backups/` or
-`inventory-summary/` (for example `@Recently-Snapshot/`) are skipped
-because the vendor script itself would reject them anyway.
+expect. Folders that don't contain the version's backup subfolders (for
+example `@Recently-Snapshot/`) are skipped because the vendor script itself
+would reject them anyway.
 
-If `/backups` already contains `cluster-node-backups/` /
-`inventory-summary/` directly (the legacy single-instance layout), the
-wrapper detects that and uses `/backups` as the only target without
-scanning further.
+If `/backups` already contains the version's backup subfolders directly
+(the legacy single-instance layout), the wrapper detects that and uses
+`/backups` as the only target without scanning further.
 
 Set `DISCOVER_INSTANCES=false` to fully disable detection and force
 the wrapper back to its original behavior of passing `/backups`
@@ -201,7 +225,8 @@ start.
 ```yaml
 services:
   nsx-backup-cleaner:
-    image: ghcr.io/patschi/vmware-nsx-backup-cleaner-container:latest
+    # Pin the tag to your NSX version (:4.1 / :4.2); :latest tracks the newest.
+    image: ghcr.io/patschi/vmware-nsx-backup-cleaner-container:4.2
     container_name: nsx-backup-cleaner
     restart: unless-stopped
     environment:
@@ -244,7 +269,7 @@ docker run --rm \
     -e RETENTION_DAYS=7 \
     -e MIN_BACKUPS=10 \
     -v /srv/sftp/nsx/backups:/backups \
-    ghcr.io/patschi/vmware-nsx-backup-cleaner-container:latest
+    ghcr.io/patschi/vmware-nsx-backup-cleaner-container:4.2
 ```
 
 ## Container user (UID)
@@ -274,9 +299,17 @@ services:
 
 ## Build
 
+Pass `NSX_VERSION` to select which `vendor-scripts/<version>/` script is
+shipped (defaults to the highest version). Build one image per NSX version:
+
 ```sh
-docker build -t vmware-nsx-backup-cleaner-container:latest .
+docker build --build-arg NSX_VERSION=4.1 -t vmware-nsx-backup-cleaner-container:4.1 .
+docker build --build-arg NSX_VERSION=4.2 -t vmware-nsx-backup-cleaner-container:4.2 .
 ```
+
+The CI pipeline does this automatically for every folder under
+`vendor-scripts/`, tagging each image with the folder name and additionally
+tagging the highest version as `:latest`.
 
 The `Dockerfile` uses a two-stage build:
 

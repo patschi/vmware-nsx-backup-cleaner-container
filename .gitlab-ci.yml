@@ -11,6 +11,9 @@ variables:
   SECRET_DETECTION_ENABLED: "true"
   GITLAB_ADVANCED_SAST_ENABLED: "true"
   CI_APPLICATION_REPOSITORY: "$CI_REGISTRY_IMAGE"
+  # Image tag the container-scanning template scans. The push jobs now build
+  # one image per NSX major version (tags :4.1, :4.2, ...) plus :latest for
+  # the highest version, so scanning :latest covers the newest published image.
   CI_APPLICATION_TAG: "latest"
   GHCR_IMAGE: "ghcr.io/patschi/vmware-nsx-backup-cleaner-container"
   GITHUB_PROJECT_URL: "https://github.com/patschi/vmware-nsx-backup-cleaner-container"
@@ -116,9 +119,9 @@ stages:
       when: always
     - when: never
 
-# Lint only the wrapper. vendor-scripts/nsx_backup_cleaner.py is vendor code
-# (copied verbatim from VMware's NSX Manager appliance) and is
-# intentionally excluded from lint checks.
+# Lint only the wrapper. The per-version vendor-scripts/*/nsx_backup_cleaner.py
+# files are vendor code (copied verbatim from VMware's NSX Manager appliance)
+# and are intentionally excluded from lint checks.
 lint-ruff-check:
   extends: .ruff-base
   script:
@@ -138,8 +141,9 @@ lint-ruff-format:
 
 # Run the pytest suite against entrypoint.py. uv sync installs both the
 # runtime dep (croniter) and the dev dep (pytest) from the pinned lockfile.
-# Tests deliberately do not exercise vendor-scripts/nsx_backup_cleaner.py since
-# that file is vendor code we cannot modify in response to test failures.
+# Beyond a per-version smoke test, the suite deliberately does not probe the
+# vendor-scripts/*/nsx_backup_cleaner.py internals since they are vendor code
+# we cannot modify in response to test failures.
 test-pytest:
   extends: .uv-base
   stage: test
@@ -193,12 +197,25 @@ lint-uv-audit:
     - when: never
 
 # Push container to GitLab Container Registry
+# NSX major versions to build - one image per vendor-scripts/<version> folder,
+# tagged with the folder name (:4.1, :4.2, ...). Keep this list in sync with
+# the folders under vendor-scripts/. The highest version is additionally
+# published as :latest, computed at build time from the folders (not hardcoded
+# here), so adding a new version only needs an entry in this list.
+.nsx-versions: &nsx-versions
+  NSX_VERSION: ["4.1", "4.2"]
+
 push-container-gitlab:
   stage: build-container
   interruptible: true
   image:
     name: martizih/kaniko:v1.28.0-debug@sha256:eaa584c90089955adc0c48773c4e4670b55383eb13372bbf56a9cf7238bde69f
     entrypoint: [""]
+  # One parallel job per NSX major version. Each builds the Dockerfile with the
+  # matching NSX_VERSION build-arg (selects the vendor-scripts/<version> folder).
+  parallel:
+    matrix:
+      - *nsx-versions
   variables:
     FF_KANIKO_OCI_STAGES: 'true'
   before_script: []
@@ -207,6 +224,15 @@ push-container-gitlab:
     # Parse BASE_VERSION from pyproject.toml - the single source of truth for the version number.
     # awk splits on " and prints the second field from the matching line, e.g. "0.1.0" -> 0.1.0.
     - BASE_VERSION=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' pyproject.toml)
+    # Determine the highest vendor-scripts/<version> folder; that image is also
+    # published as :latest. `sort -t. -k1,1n -k2,2n` is a numeric version sort
+    # (so 4.10 > 4.2) using only flags busybox `sort` provides.
+    - HIGHEST_VERSION=$(printf '%s\n' vendor-scripts/*/ | sed 's#vendor-scripts/##; s#/$##' | sort -t. -k1,1n -k2,2n | tail -n1)
+    # Always publish the version-specific tag; additionally publish :latest for
+    # the highest version. Unquoted expansion of DESTINATIONS lets the shell
+    # word-split it into one or two --destination flags.
+    - DESTINATIONS="--destination=$CI_REGISTRY_IMAGE:$NSX_VERSION"
+    - if [ "$NSX_VERSION" = "$HIGHEST_VERSION" ]; then DESTINATIONS="$DESTINATIONS --destination=$CI_REGISTRY_IMAGE:latest"; fi
     - >
       /kaniko/executor
       --cache=false
@@ -222,11 +248,13 @@ push-container-gitlab:
       --annotation="org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
       --annotation="org.opencontainers.image.description=$CI_PROJECT_DESCRIPTION"
       --annotation="org.opencontainers.image.licenses=GPLv3"
+      --annotation="com.vmware.nsx.version=${NSX_VERSION}"
+      --build-arg="NSX_VERSION=${NSX_VERSION}"
       --build-arg="BASE_VERSION=${BASE_VERSION}"
       --build-arg="GIT_HASH=${CI_COMMIT_SHORT_SHA}"
       --context="$CI_PROJECT_DIR"
       --dockerfile="$CI_PROJECT_DIR/Dockerfile"
-      --destination="$CI_REGISTRY_IMAGE:$CI_APPLICATION_TAG"
+      $DESTINATIONS
   retry:
     max: 2
     when:
@@ -251,18 +279,31 @@ push-container-ghcr:
   image:
     name: gcr.io/go-containerregistry/crane:debug@sha256:1b1fb24d2b1bb27a9daf81a588157e68463876904e8e537a812edba6284fb252
     entrypoint: [""]
+  # Mirror the build matrix so each version's GitLab image is copied to GHCR.
+  parallel:
+    matrix:
+      - *nsx-versions
   needs:
+    # Referencing the matrix build job by name depends on all its parallel
+    # instances, so every version's image exists in the GitLab registry before
+    # any copy to GHCR runs.
     - job: push-container-gitlab
       optional: true
   before_script: []
   script:
     - mkdir -p /root/.docker
     - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"},\"ghcr.io\":{\"auth\":\"$(printf "%s:%s" "${GHCR_USER}" "${GHCR_TOKEN}" | base64 | tr -d '\n')\"}}}" > /root/.docker/config.json
+    # Copy the version-specific image from GitLab to GHCR, adding the GitHub
+    # source label. crane mutate re-tags the mutated image as :$NSX_VERSION.
     - >
       crane mutate
       --label="org.opencontainers.image.source=$GITHUB_PROJECT_URL"
-      --tag="$GHCR_IMAGE:$CI_APPLICATION_TAG"
-      "$CI_REGISTRY_IMAGE:$CI_APPLICATION_TAG"
+      --tag="$GHCR_IMAGE:$NSX_VERSION"
+      "$CI_REGISTRY_IMAGE:$NSX_VERSION"
+    # For the highest version, also point GHCR :latest at the just-pushed image.
+    # `crane tag` adds the tag registry-side without re-pulling the layers.
+    - HIGHEST_VERSION=$(printf '%s\n' vendor-scripts/*/ | sed 's#vendor-scripts/##; s#/$##' | sort -t. -k1,1n -k2,2n | tail -n1)
+    - if [ "$NSX_VERSION" = "$HIGHEST_VERSION" ]; then crane tag "$GHCR_IMAGE:$NSX_VERSION" latest; fi
   # Mirror push-container-gitlab's rules so ghcr only runs when the gitlab
   # push job actually produced an image. Without this, ghcr ran on every
   # pipeline (e.g. MR pipelines) and the hard `needs` reference to a skipped

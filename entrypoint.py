@@ -147,7 +147,36 @@ ONE_SHOT_SENTINEL = "0"
 # these markers exists as a subdirectory inside it. Mirrors the
 # eligibility check in vendor `nsx_backup_cleaner.py::main` so the
 # wrapper never hands the vendor a directory it would reject.
-NSX_INSTANCE_MARKERS = ("cluster-node-backups", "inventory-summary")
+#
+# The vendor script renamed these backup categories between NSX major
+# releases, so the marker set is version-specific:
+#   - 4.1: cluster-node-backups / inventory-summary
+#   - 4.2: nsx-bkp / nsx-inv
+# Each image ships exactly one vendor script version (see Dockerfile), so
+# the correct marker set is selected below via NSX_VERSION.
+NSX_INSTANCE_MARKERS_BY_VERSION = {
+    "4.1": ("cluster-node-backups", "inventory-summary"),
+    "4.2": ("nsx-bkp", "nsx-inv"),
+}
+
+# NSX major version this image targets. Baked into the image via the
+# Dockerfile ENV (from the NSX_VERSION build arg); every published image
+# sets it explicitly. The default is only a fallback for bare local runs
+# (no NSX_VERSION set) and points at the highest known version so it stays
+# aligned with the `latest` image tag.
+DEFAULT_NSX_VERSION = "4.2"
+NSX_VERSION = os.environ.get("NSX_VERSION", None) or DEFAULT_NSX_VERSION
+
+# Resolve the marker set for the configured version. An unknown NSX_VERSION
+# is a build/deploy misconfiguration - fail loudly at startup rather than
+# silently discovering zero backup instances at cleanup time.
+try:
+    NSX_INSTANCE_MARKERS = NSX_INSTANCE_MARKERS_BY_VERSION[NSX_VERSION]
+except KeyError:
+    raise SystemExit(
+        f"Unsupported NSX_VERSION={NSX_VERSION!r}; expected one of "
+        f"{sorted(NSX_INSTANCE_MARKERS_BY_VERSION)}"
+    )
 
 # Shutdown signal. Set by the SIGTERM/SIGINT handler and observed by the
 # scheduler loop. Using threading.Event lets the loop block in a single
@@ -667,6 +696,14 @@ def main() -> None:
     app_name, app_version = get_app_metadata()
     git_hash = os.environ.get("APP_GIT_HASH", "unknown")
     logging.info("Starting %s version %s (commit %s)", app_name, app_version, git_hash)
+    # Log which NSX major version this image targets and the backup markers it
+    # will discover, so the operator can confirm the image matches their NSX
+    # deployment without inspecting the vendor script.
+    logging.info(
+        "Targeting NSX %s (backup instance markers: %s)",
+        NSX_VERSION,
+        ", ".join(NSX_INSTANCE_MARKERS),
+    )
 
     try:
         (
