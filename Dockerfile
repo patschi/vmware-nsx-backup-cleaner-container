@@ -20,7 +20,7 @@
 # README.md for instructions on switching to a non-root UID.
 
 # ---------- Stage 1: build dependencies in a full Python image ----------
-FROM python:3.13-slim-trixie@sha256:eb43ff125d8d58d7449dcba7d336c23bcac412f526d861db493b9994d8010280 AS builder
+FROM python:3.13-slim-trixie@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91 AS builder
 
 WORKDIR /build
 
@@ -50,7 +50,7 @@ RUN uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt && \
 # and its core C libraries - no shell, no package manager, minimal attack
 # surface. The default (non-:nonroot) tag runs as root (UID 0), which is
 # needed to chmod/delete backup files owned by the SFTP user on the host.
-FROM gcr.io/distroless/python3-debian13:latest@sha256:393cdf69ec7a5e217f837f2ff9b2123e06545d89c6e718c14ad020451fcb1900
+FROM gcr.io/distroless/python3-debian13:latest@sha256:3f056d8b0189540a15b5a3a125cfd28fb0960af0af2c56cf8bcec613fd771a00
 
 # Build-time metadata consumed by LABEL/ENV below. BASE_VERSION is read
 # from pyproject.toml by the CI pipeline (see .gitlab-ci.yml); GIT_HASH
