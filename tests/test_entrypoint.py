@@ -17,7 +17,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -706,7 +706,7 @@ def test_run_loop_exits_cleanly_when_stop_event_set(monkeypatch):
 
 def test_wait_until_returns_false_on_normal_timeout():
     # Pick a target ~0.2s in the future so the wait actually returns quickly.
-    target = datetime.now(timezone.utc) + timedelta(milliseconds=200)
+    target = datetime.now(UTC) + timedelta(milliseconds=200)
     t0 = time.monotonic()
     interrupted = entrypoint.wait_until(target)
     elapsed = time.monotonic() - t0
@@ -717,7 +717,7 @@ def test_wait_until_returns_false_on_normal_timeout():
 def test_wait_until_returns_true_when_signal_fires():
     # Set the stop event from a thread mid-wait; wait_until must return True
     # almost immediately instead of running to its (10s) timeout.
-    target = datetime.now(timezone.utc) + timedelta(seconds=10)
+    target = datetime.now(UTC) + timedelta(seconds=10)
 
     def _signal_shutdown():
         time.sleep(0.05)

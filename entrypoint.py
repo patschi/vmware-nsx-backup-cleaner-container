@@ -92,7 +92,7 @@ import sys
 import threading
 import time
 import tomllib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
@@ -184,6 +184,15 @@ except KeyError:
 # calls, and gives signals an immediate wake-up.
 _stop_event = threading.Event()
 
+# Module-level logger used for every log call in this wrapper. Preferred
+# over the module-level logging.info()/logging.warning() helpers, which
+# log straight to the root logger: a named logger keeps this module's
+# records attributable and leaves the root logger to third-party output.
+# Records still propagate to the root handler that setup_logging()
+# installs, and the configured format carries no %(name)s field, so the
+# emitted log lines are byte-for-byte what they were before.
+logger = logging.getLogger(__name__)
+
 
 def setup_logging() -> None:
     """Configure root logging at DEBUG level on stdout.
@@ -224,7 +233,7 @@ def get_app_metadata() -> tuple[str, str]:
         # A missing or broken pyproject.toml is non-fatal for the wrapper;
         # log at WARNING so the operator can investigate without the
         # container crash-looping.
-        logging.warning("Could not read %s for version info: %s", PYPROJECT_PATH, exc)
+        logger.warning("Could not read %s for version info: %s", PYPROJECT_PATH, exc)
         return APP_NAME, "unknown"
 
 
@@ -236,7 +245,7 @@ def _handle_shutdown_signal(signum: int, _frame: object) -> None:
     times - the event is idempotent.
     """
     name = signal.Signals(signum).name
-    logging.info("Received %s - shutting down after current work completes.", name)
+    logger.info("Received %s - shutting down after current work completes.", name)
     _stop_event.set()
 
 
@@ -396,7 +405,7 @@ def discover_instances(root: str) -> list[str]:
         # Walk only depth-1 entries; deeper nesting is not a supported layout.
         children = sorted(os.listdir(root))
     except OSError as exc:
-        logging.error("Cannot list backup root %s: %s", root, exc)
+        logger.error("Cannot list backup root %s: %s", root, exc)
         return instances
 
     for elem in children:
@@ -424,18 +433,18 @@ def resolve_targets(discover_enabled: bool) -> list[str]:
     if not instances:
         # Discovery on but nothing matched - surface this loudly so a
         # misconfigured mount or empty backup root is immediately obvious.
-        logging.warning(
+        logger.warning(
             "Discovery enabled but no NSX backup instance folders found under %s",
             BACKUP_DIR,
         )
         return []
 
     # Log every discovered instance so operators can audit what will be cleaned.
-    logging.info(
+    logger.info(
         "Discovered %d NSX backup instance(s) under %s:", len(instances), BACKUP_DIR
     )
     for inst in instances:
-        logging.info("  - %s", inst)
+        logger.info("  - %s", inst)
     return instances
 
 
@@ -482,9 +491,9 @@ def run_cleaner(
         # Stop here in dry-run mode: log the would-be command at INFO so
         # the operator can verify it, then short-circuit before any
         # subprocess (and thus any filesystem mutation) can happen.
-        logging.info("[DRY-RUN] Would invoke cleaner: %s", " ".join(cmd))
+        logger.info("[DRY-RUN] Would invoke cleaner: %s", " ".join(cmd))
         return 0
-    logging.info("Invoking cleaner: %s", " ".join(cmd))
+    logger.info("Invoking cleaner: %s", " ".join(cmd))
     started = time.monotonic()
     # Capture both streams and merge stderr into stdout so the relative
     # ordering of any vendor prints/errors is preserved in the log.
@@ -500,9 +509,9 @@ def run_cleaner(
     # already discards; empty lines from the vendor script are kept so
     # the operator sees exactly what the vendor printed.
     for line in (result.stdout or "").splitlines():
-        logging.debug("[vendor] %s", line)
+        logger.debug("[vendor] %s", line)
     duration = time.monotonic() - started
-    logging.info(
+    logger.info(
         "Cleaner finished in %.2fs with exit code %d", duration, result.returncode
     )
     return result.returncode
@@ -529,9 +538,9 @@ def run_cleaner_for_all(
     for target in targets:
         # Run each instance independently; do not short-circuit on failure.
         rc = run_cleaner(target, retention_days, min_backups, dry_run=dry_run)
-        # max_rc starts at 0, so `rc > max_rc` already excludes successful runs.
-        if rc > max_rc:
-            max_rc = rc
+        # max_rc starts at 0, so max() keeps the worst rc seen and successful
+        # runs (rc == 0) can never raise it.
+        max_rc = max(max_rc, rc)
     return max_rc
 
 
@@ -548,7 +557,7 @@ def wait_until(next_fire_at: datetime) -> bool:
         ``True`` if the wait was interrupted by a shutdown signal,
         ``False`` if the timeout elapsed normally.
     """
-    remaining = (next_fire_at - datetime.now(timezone.utc)).total_seconds()
+    remaining = (next_fire_at - datetime.now(UTC)).total_seconds()
     if remaining <= 0:
         return _stop_event.is_set()
     return _stop_event.wait(timeout=remaining)
@@ -601,10 +610,10 @@ def run_loop(
     try:
         itr = croniter(schedule, datetime.now(tz))
     except (ValueError, KeyError) as exc:
-        logging.error("Invalid cron expression %r: %s", schedule, exc)
+        logger.error("Invalid cron expression %r: %s", schedule, exc)
         sys.exit(2)
 
-    logging.info(
+    logger.info(
         "Starting scheduler: schedule=%r tz=%s retention_days=%d min_backups=%d "
         "dir=%s discover_instances=%s discover_once=%s run_on_startup=%s dry_run=%s",
         schedule,
@@ -626,7 +635,7 @@ def run_loop(
     # redo the scan in the same second.
     startup_targets: list[str] | None = None
     if discover_enabled:
-        logging.info("Performing startup discovery pass.")
+        logger.info("Performing startup discovery pass.")
         startup_targets = resolve_targets(discover_enabled=True)
 
     # Optional immediate cleanup right after container start. Reuses the
@@ -634,7 +643,7 @@ def run_loop(
     # discovery is disabled, fall back to resolve_targets which simply
     # returns [BACKUP_DIR].
     if run_on_startup:
-        logging.info(
+        logger.info(
             "RUN_ON_STARTUP=true - running cleanup once immediately before entering cron loop."
         )
         startup_run_targets = (
@@ -648,19 +657,19 @@ def run_loop(
             # Discovery turned up nothing - log loudly so the operator notices
             # but still continue into the scheduled loop (a fresh mount may
             # show up later).
-            logging.warning(
+            logger.warning(
                 "RUN_ON_STARTUP=true but no cleanup targets resolved - skipping startup run."
             )
         # If a SIGTERM arrived during the startup cleanup, exit immediately
         # instead of falling through to wait_until just to exit on the next
         # loop iteration.
         if _stop_event.is_set():
-            logging.info("Scheduler stopped - graceful shutdown complete.")
+            logger.info("Scheduler stopped - graceful shutdown complete.")
             return
 
     while not _stop_event.is_set():
         next_fire_at = itr.get_next(datetime)
-        logging.info("Next run scheduled at %s", next_fire_at.isoformat())
+        logger.info("Next run scheduled at %s", next_fire_at.isoformat())
         if wait_until(next_fire_at):
             # Shutdown signal arrived during the wait - exit without firing.
             break
@@ -676,11 +685,11 @@ def run_loop(
         if not targets:
             # Either discovery returned nothing or BACKUP_DIR was empty;
             # skip this firing and wait for the next scheduled time.
-            logging.warning("No cleanup targets for this run - skipping.")
+            logger.warning("No cleanup targets for this run - skipping.")
             continue
 
         run_cleaner_for_all(targets, retention_days, min_backups, dry_run=dry_run)
-    logging.info("Scheduler stopped - graceful shutdown complete.")
+    logger.info("Scheduler stopped - graceful shutdown complete.")
 
 
 def main() -> None:
@@ -695,11 +704,11 @@ def main() -> None:
     # falls back to "unknown" which is still useful context.
     app_name, app_version = get_app_metadata()
     git_hash = os.environ.get("APP_GIT_HASH", "unknown")
-    logging.info("Starting %s version %s (commit %s)", app_name, app_version, git_hash)
+    logger.info("Starting %s version %s (commit %s)", app_name, app_version, git_hash)
     # Log which NSX major version this image targets and the backup markers it
     # will discover, so the operator can confirm the image matches their NSX
     # deployment without inspecting the vendor script.
-    logging.info(
+    logger.info(
         "Targeting NSX %s (backup instance markers: %s)",
         NSX_VERSION,
         ", ".join(NSX_INSTANCE_MARKERS),
@@ -717,28 +726,28 @@ def main() -> None:
             tz,
         ) = read_config()
     except ValueError as exc:
-        logging.error("Configuration error: %s", exc)
+        logger.error("Configuration error: %s", exc)
         sys.exit(2)
 
     # Surface the dry-run state at INFO so it is obvious in the logs why
     # nothing got deleted on this run. Done before mode dispatch so it
     # applies to both one-shot and scheduled invocations.
     if dry_run:
-        logging.info(
+        logger.info(
             "DRY_RUN=true - vendor cleanup script will NOT be invoked; "
             "the wrapper will only log what would have run."
         )
 
     # SCHEDULE="0" is the documented one-shot mode: run once and exit.
     if schedule.strip() == ONE_SHOT_SENTINEL:
-        logging.info(
+        logger.info(
             "SCHEDULE=%s detected - running once and exiting.", ONE_SHOT_SENTINEL
         )
         # RUN_ON_STARTUP is meaningless in one-shot mode because the only
         # firing IS the startup firing. Warn (not error) so a user who set
         # both notices the redundancy without the container refusing to start.
         if run_on_startup:
-            logging.warning(
+            logger.warning(
                 "RUN_ON_STARTUP=true is redundant when SCHEDULE=%s - ignoring.",
                 ONE_SHOT_SENTINEL,
             )
@@ -747,7 +756,7 @@ def main() -> None:
         # effect here since there is only one firing.
         targets = resolve_targets(discover_enabled)
         if not targets:
-            logging.error("No cleanup targets resolved - exiting with code 2.")
+            logger.error("No cleanup targets resolved - exiting with code 2.")
             sys.exit(2)
         exit_code = run_cleaner_for_all(
             targets, retention_days, min_backups, dry_run=dry_run

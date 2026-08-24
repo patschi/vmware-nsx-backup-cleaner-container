@@ -62,12 +62,19 @@ Tests cover the wrapper only - the vendor script is intentionally not exercised 
 
 ### Linting
 
+ruff is a pinned dev dependency, so `uv run` uses the exact version CI does - no
+separate tool install and no "works locally, fails in CI" version drift:
+
 ```bash
-uvx ruff check entrypoint.py
-uvx ruff format --check entrypoint.py
+uv run ruff check .
+uv run ruff format --check .
 ```
 
-CI runs the same commands on every MR via `.gitlab-ci.yml`.
+CI lints `entrypoint.py` only (the `vendor-scripts/` trees are excluded via
+`extend-exclude` in `pyproject.toml`, and `tests/` is not part of the lint jobs),
+so running the commands above over the whole project is the stricter check of the
+two. `RUFF_VERSION` in `.gitlab-ci.yml` is kept identical to the `pyproject.toml`
+pin; Renovate bumps both in one PR.
 
 ### Building the container
 

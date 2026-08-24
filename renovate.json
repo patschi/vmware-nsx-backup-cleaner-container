@@ -54,11 +54,6 @@
             "pinDigests": false
         },
         {
-            "description": "Automerge ruff updates - linting tool with no runtime impact.",
-            "matchDepNames": ["ruff"],
-            "automerge": true
-        },
-        {
             "description": "Group the whole Python runtime - the distroless base image, the Dockerfile builder image, and the CI python image - into a single 'python-runtime' PR so they always move together and any version drift is visible in one place. The Debian codename and the Python minor are locked in sync via allowedVersions below (Debian 13 Trixie ships Python 3.13). NOTE: Renovate cannot derive the Python minor from the distroless Debian codename (different datasources and versioning schemes), so bumping to a new base OS is a coordinated manual edit - change the distroless tag (python3-debian13 -> python3-debian14) AND the allowedVersions regex (/^3.13/ -> /^3.14/) together in one commit.",
             "matchDepNames": ["python", "gcr.io/distroless/python3-debian13"],
             "groupName": "python-runtime",
@@ -97,7 +92,7 @@
             "minimumReleaseAge": "3 days"
         },
         {
-            "description": "Group application Python dependency patch updates (from pyproject.toml) into one PR. Safe to automerge - scoped to uv manager only so uv/ruff tool pins are unaffected.",
+            "description": "Group application Python dependency patch updates (from pyproject.toml) into one PR. Safe to automerge - scoped to uv manager only, so the uv tool pin is unaffected. ruff also lives in this manager now, but the trailing ruff rule below re-groups it out of here.",
             "matchManagers": ["uv"],
             "matchUpdateTypes": ["patch"],
             "groupName": "python dependencies (patch)",
@@ -108,6 +103,12 @@
             "matchManagers": ["uv"],
             "matchUpdateTypes": ["minor", "major"],
             "groupName": "python dependencies (minor/major)"
+        },
+        {
+            "description": "Automerge ruff updates - linting tool with no runtime impact. ruff is pinned in two places: the RUFF_VERSION CI variable (regex manager above) and the dev dependency group in pyproject.toml (uv manager). groupName bundles both into a single PR so the lint jobs and a local `uv run ruff` can never judge by different rule sets. MUST stay the last rule: Renovate applies packageRules in order and later rules override earlier ones, so placing it above the 'python dependencies' groups would let those re-group the pyproject pin away from the CI one.",
+            "matchDepNames": ["ruff"],
+            "groupName": "ruff",
+            "automerge": true
         }
     ]
 }
