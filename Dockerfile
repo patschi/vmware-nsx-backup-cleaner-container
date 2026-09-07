@@ -20,7 +20,7 @@
 # README.md for instructions on switching to a non-root UID.
 
 # ---------- Stage 1: build dependencies in a full Python image ----------
-FROM python:3.13-slim-trixie@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a AS builder
+FROM python:3.13-slim-trixie@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285 AS builder
 
 WORKDIR /build
 
