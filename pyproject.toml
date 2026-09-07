@@ -24,7 +24,7 @@ dev = [
     # ruff lints and formats the wrapper and the test suite. Pinned to the
     # exact version the CI lint jobs run (RUFF_VERSION in .gitlab-ci.yml) so
     # a local `ruff check` can never disagree with the pipeline.
-    "ruff==0.16.5",
+    "ruff==0.16.6",
 ]
 
 [tool.setuptools]
