@@ -20,7 +20,7 @@ dependencies = [
 # and excluded from container images via `uv export --no-dev`.
 [dependency-groups]
 dev = [
-    "pytest==9.1.1",
+    "pytest==9.2.0",
     # ruff lints and formats the wrapper and the test suite. Pinned to the
     # exact version the CI lint jobs run (RUFF_VERSION in .gitlab-ci.yml) so
     # a local `ruff check` can never disagree with the pipeline.
