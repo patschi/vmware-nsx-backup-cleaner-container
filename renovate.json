@@ -93,14 +93,14 @@
         },
         {
             "description": "Group application Python dependency patch updates (from pyproject.toml) into one PR. Safe to automerge - scoped to uv manager only, so the uv tool pin is unaffected. ruff also lives in this manager now, but the trailing ruff rule below re-groups it out of here.",
-            "matchManagers": ["uv"],
+            "matchManagers": ["pep621"],
             "matchUpdateTypes": ["patch"],
             "groupName": "python dependencies (patch)",
             "automerge": true
         },
         {
             "description": "Group application Python dependency minor and major updates (from pyproject.toml) into one PR for manual review. croniter is the only runtime dep, so any non-patch bump should be reviewed before merging.",
-            "matchManagers": ["uv"],
+            "matchManagers": ["pep621"],
             "matchUpdateTypes": ["minor", "major"],
             "groupName": "python dependencies (minor/major)"
         },
